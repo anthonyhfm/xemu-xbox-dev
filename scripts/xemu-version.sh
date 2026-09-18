@@ -4,22 +4,22 @@ set -eu
 
 dir="$1"
 XEMU_DATE=$(date -u)
-XEMU_COMMIT=$( \
-  cd "$dir"; \
-  if test -e .git; then \
-    git rev-parse HEAD 2>/dev/null | tr -d '\n'; \
-  elif test -e XEMU_COMMIT; then \
-    cat XEMU_COMMIT; \
-  fi) || true
-XEMU_VERSION=$( \
-  cd "$dir"; \
-  if test -e .git; then \
-    git describe --tags --match 'v*' 2>/dev/null | cut -c 2- | tr -d '\n'; \
-  elif test -e XEMU_VERSION; then \
-    cat XEMU_VERSION; \
-  fi) || true
+if test -e "$dir/.git"; then
+  XEMU_COMMIT=$(git -C "$dir" rev-parse HEAD 2>/dev/null | tr -d '\n') || true
+elif test -e "$dir/XEMU_COMMIT"; then
+  XEMU_COMMIT=$(cat "$dir/XEMU_COMMIT") || true
+else
+  XEMU_COMMIT=""
+fi
+if test -e "$dir/.git"; then
+  XEMU_VERSION=$(git -C "$dir" describe --tags --match 'v*' 2>/dev/null | cut -c 2- | tr -d '\n') || true
+elif test -e "$dir/XEMU_VERSION"; then
+  XEMU_VERSION=$(cat "$dir/XEMU_VERSION") || true
+else
+  XEMU_VERSION=""
+fi
 
-if [[ "${XEMU_VERSION}" == "" ]]; then
+if [ -z "${XEMU_VERSION}" ]; then
   XEMU_VERSION="0.0.0"
 fi
 
