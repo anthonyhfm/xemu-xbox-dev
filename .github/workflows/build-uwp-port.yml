@@ -56,7 +56,11 @@ jobs:
       - name: Check out xemu
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           ref: ${{ inputs.ref || github.ref }}
+
+      - name: Fetch upstream version tags
+        run: git fetch --force https://github.com/xemu-project/xemu.git "refs/tags/v*:refs/tags/v*"
 
       - name: Check out SDL3_UWP
         uses: actions/checkout@v4
