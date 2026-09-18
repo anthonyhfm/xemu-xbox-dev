@@ -82,6 +82,7 @@ jobs:
             git
             make
             mingw-w64-ucrt-x86_64-curl
+            mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-glib2
             mingw-w64-ucrt-x86_64-libepoxy
