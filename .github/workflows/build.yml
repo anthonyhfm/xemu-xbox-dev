@@ -12,6 +12,9 @@ on:
         description: Build version
         value: ${{ jobs.source.outputs.pkg_version }}
 
+permissions:
+  contents: read
+
 jobs:
   source:
     name: Create source package
