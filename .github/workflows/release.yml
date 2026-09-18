@@ -70,3 +70,4 @@ jobs:
           dist/xemu*-win*.zip
           dist/xemu*-macos-universal*.zip
           dist/xemu*.AppImage
+          dist/xemu*-xbox-uwp*.zip

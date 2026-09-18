@@ -77,6 +77,14 @@ jobs:
     with:
       pkg_version: ${{ needs.source.outputs.pkg_version }}
 
+  uwp:
+    name: Xbox UWP
+    needs: source
+    uses: ./.github/workflows/build-uwp-port.yml
+    with:
+      ref: ${{ inputs.ref }}
+      pkg_version: ${{ needs.source.outputs.pkg_version }}
+
   test:
     name: Unit tests
     needs: source

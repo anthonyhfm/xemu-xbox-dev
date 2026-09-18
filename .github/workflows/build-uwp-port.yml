@@ -24,6 +24,16 @@ on:
       - 'tools/vlan-relay/**'
       - 'meson.build'
       - 'meson_options.txt'
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref (commit, branch, or tag) to build"
+        required: false
+        type: string
+      pkg_version:
+        description: "Build version, used to name the release package"
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -46,6 +56,7 @@ jobs:
       - name: Check out xemu
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.ref || github.ref }}
           submodules: recursive
 
       - name: Check out SDL3_UWP
@@ -217,5 +228,35 @@ jobs:
             UWP-Port/AppPackages/**/*.cer
             UWP-Port/AppPackages/**/*.appxsym
             UWP-Port/AppPackages/**/Dependencies/**
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Determine package version
+        id: package_id
+        shell: bash
+        run: |
+          version="${{ inputs.pkg_version }}"
+          if [ -z "${version}" ]; then
+            version="0.0.0-0-unofficial-$(git rev-parse --short HEAD)"
+          fi
+          echo "pkg_filename=xemu-${version}-xbox-uwp-x64.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Bundle release package
+        if: ${{ inputs.pkg_version != '' }}
+        shell: pwsh
+        run: |
+          $dest = "dist"
+          if (Test-Path -LiteralPath $dest) {
+            Remove-Item -LiteralPath $dest -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $dest | Out-Null
+          Compress-Archive -Path 'UWP-Port\AppPackages\*' -DestinationPath "$dest\${{ steps.package_id.outputs.pkg_filename }}"
+
+      - name: Upload release package
+        if: ${{ inputs.pkg_version != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xemu-uwp-x64-release
+          path: dist/${{ steps.package_id.outputs.pkg_filename }}
           if-no-files-found: error
           compression-level: 0
