@@ -10,14 +10,14 @@ XEMU_COMMIT=$( \
     git rev-parse HEAD 2>/dev/null | tr -d '\n'; \
   elif test -e XEMU_COMMIT; then \
     cat XEMU_COMMIT; \
-  fi)
+  fi) || true
 XEMU_VERSION=$( \
   cd "$dir"; \
   if test -e .git; then \
-    git describe --tags --match 'v*' | cut -c 2- | tr -d '\n'; \
+    git describe --tags --match 'v*' 2>/dev/null | cut -c 2- | tr -d '\n'; \
   elif test -e XEMU_VERSION; then \
     cat XEMU_VERSION; \
-  fi)
+  fi) || true
 
 if [[ "${XEMU_VERSION}" == "" ]]; then
   XEMU_VERSION="0.0.0"
