@@ -29,6 +29,7 @@ static QemuThread host_loop_thread;
 static QemuHostLogCallback host_log_callback;
 static void *host_log_opaque;
 static FILE *host_log_file;
+static char *host_pipeline_cache_file;
 static GMutex host_storage_lock;
 static QemuHostStorageCallbacks host_storage_callbacks;
 static void *host_storage_opaque;
@@ -320,6 +321,27 @@ int qemu_host_set_log_file(const char *path)
     host_log_file = file;
     g_mutex_unlock(&host_log_lock);
     return 0;
+}
+
+int qemu_host_set_pipeline_cache_file(const char *path)
+{
+    char *copy = path && *path ? g_strdup(path) : NULL;
+
+    g_mutex_lock(&host_state_lock);
+    g_free(host_pipeline_cache_file);
+    host_pipeline_cache_file = copy;
+    g_mutex_unlock(&host_state_lock);
+    return 0;
+}
+
+char *qemu_host_dup_pipeline_cache_file(void)
+{
+    char *copy;
+
+    g_mutex_lock(&host_state_lock);
+    copy = g_strdup(host_pipeline_cache_file);
+    g_mutex_unlock(&host_state_lock);
+    return copy;
 }
 
 int qemu_host_register_storage_callbacks(
@@ -1171,6 +1193,7 @@ int qemu_host_cleanup(void)
     g_mutex_unlock(&host_storage_lock);
     qemu_host_register_log_callback(NULL, NULL);
     qemu_host_set_log_file(NULL);
+    qemu_host_set_pipeline_cache_file(NULL);
     return 0;
 }
 
