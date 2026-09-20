@@ -115,6 +115,13 @@
     <AppInstallerUri>$(ProjectDir)AppPackages</AppInstallerUri>
     <HoursBetweenUpdateChecks>0</HoursBetweenUpdateChecks>
   </PropertyGroup>
+  <PropertyGroup>
+    <!-- VCToolsVersion identifies the compiler, but the matching redistributable
+         directory can have a different servicing version. The MSBuild toolset
+         resolves that version through VCToolsRedistInstallDir. -->
+    <UwpOneCoreCrtDir Condition="Exists('$(VCToolsRedistInstallDir)onecore\x64\Microsoft.VC145.CRT\msvcp140.dll')">$(VCToolsRedistInstallDir)onecore\x64\Microsoft.VC145.CRT</UwpOneCoreCrtDir>
+    <UwpOneCoreCrtDir Condition="'$(UwpOneCoreCrtDir)'=='' and Exists('$(VCToolsRedistInstallDir)onecore\x64\Microsoft.VC143.CRT\msvcp140.dll')">$(VCToolsRedistInstallDir)onecore\x64\Microsoft.VC143.CRT</UwpOneCoreCrtDir>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <Link>
       <AdditionalDependencies>d2d1.lib; d3d11.lib; dxgi.lib; windowscodecs.lib; dwrite.lib; %(AdditionalDependencies)</AdditionalDependencies>
@@ -324,9 +331,8 @@
     </Content>
     <!-- Mesa is built with MSVC and Xbox Device Portal installations do not
          always deploy the sibling Microsoft.VCLibs dependency package. Ship
-         the OneCore CRT app-local so Mesa can be loaded in that scenario.
-         The wildcard keeps this valid for VC143 and newer toolsets. -->
-    <Content Include="$(VCInstallDir)Redist\MSVC\$(VCToolsVersion)\onecore\x64\Microsoft.VC*.CRT\msvcp140.dll;$(VCInstallDir)Redist\MSVC\$(VCToolsVersion)\onecore\x64\Microsoft.VC*.CRT\vcruntime140.dll;$(VCInstallDir)Redist\MSVC\$(VCToolsVersion)\onecore\x64\Microsoft.VC*.CRT\vcruntime140_1.dll">
+         the matching OneCore CRT app-local so Mesa can be loaded there. -->
+    <Content Include="$(UwpOneCoreCrtDir)\msvcp140.dll;$(UwpOneCoreCrtDir)\vcruntime140.dll;$(UwpOneCoreCrtDir)\vcruntime140_1.dll">
       <Link>%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -352,4 +358,7 @@
     <Import Project="$(VSINSTALLDIR)\Common7\IDE\Extensions\Microsoft\VsGraphics\MeshContentTask.targets" />
     <Import Project="$(VSINSTALLDIR)\Common7\IDE\Extensions\Microsoft\VsGraphics\ShaderGraphContentTask.targets" />
   </ImportGroup>
+  <Target Name="ValidateUwpOneCoreCrt" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(Platform)'=='x64' and '$(UwpOneCoreCrtDir)'==''" Text="The x64 OneCore Visual C++ runtime directory could not be resolved from VCToolsRedistInstallDir." />
+  </Target>
 </Project>
