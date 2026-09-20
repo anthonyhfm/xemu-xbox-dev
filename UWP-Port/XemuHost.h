@@ -86,6 +86,7 @@ namespace UWP_Port
         HMODULE m_sdlModule;
         HMODULE m_openGLModule;
         HMODULE m_mesaModule;
+        HMODULE m_vulkanModule;
         std::thread m_thread;
         std::atomic<bool> m_running;
         std::atomic<bool> m_stop;
@@ -103,6 +104,8 @@ namespace UWP_Port
         using UpdateSDLPanelSize = bool (__cdecl *)(int, int, int, int);
         AttachMesa m_attachMesa;
         SetMesaSwapChainAttach m_setMesaSwapChainAttach;
+        AttachMesa m_attachDzn;
+        SetMesaSwapChainAttach m_setDznSwapChainAttach;
         UpdateSDLPanelSize m_updateSDLPanelSize;
         using AttachVirtualJoystick = SDL_JoystickID (__cdecl *)(
             const SDL_VirtualJoystickDesc*);
@@ -144,6 +147,7 @@ namespace UWP_Port
         decltype(&qemu_host_cleanup) m_cleanup;
         decltype(&qemu_host_register_log_callback) m_registerLog;
         decltype(&qemu_host_set_log_file) m_setLogFile;
+        decltype(&qemu_host_set_pipeline_cache_file) m_setPipelineCacheFile;
         decltype(&qemu_host_register_brokered_storage_callbacks) m_registerBrokeredStorage;
         decltype(&qemu_host_mount_brokered_file) m_mountFile;
         decltype(&qemu_host_mount_brokered_folder) m_mountFolder;

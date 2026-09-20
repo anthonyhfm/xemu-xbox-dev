@@ -5,15 +5,21 @@
 extern "C" {
 #endif
 
-void* uwp_get_window_reference(void);
-void uwp_set_window_reference(void *window, int width, int height);
+#if defined(_WIN32) && defined(_XBOX_UWP)
+#define MESA_UWP_EXPORT __declspec(dllexport)
+#else
+#define MESA_UWP_EXPORT
+#endif
+
+MESA_UWP_EXPORT void* uwp_get_window_reference(void);
+MESA_UWP_EXPORT void uwp_set_window_reference(void *window, int width, int height);
 typedef long (__cdecl *mesa_uwp_swapchain_attach_callback)(void *opaque,
                                                            void *swapchain);
-void mesa_uwp_set_swapchain_attach_callback(
+MESA_UWP_EXPORT void mesa_uwp_set_swapchain_attach_callback(
    mesa_uwp_swapchain_attach_callback callback, void *opaque);
-long mesa_uwp_attach_swapchain(void *swapchain);
-int uwp_get_height(void);
-int uwp_get_width(void);
+MESA_UWP_EXPORT long mesa_uwp_attach_swapchain(void *swapchain);
+MESA_UWP_EXPORT int uwp_get_height(void);
+MESA_UWP_EXPORT int uwp_get_width(void);
 
 #ifdef __cplusplus
 }

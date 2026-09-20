@@ -18,6 +18,7 @@
  */
 
 #include "hw/xbox/nv2a/nv2a_int.h"
+#include "qemu/qemu-host.h"
 #include "renderer.h"
 
 #include "gloffscreen.h"
@@ -58,16 +59,44 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
 
     pgraph_vk_init_instance(pg, errp);
     if (*errp) {
+        g_free(pg->vk_renderer_state);
+        pg->vk_renderer_state = NULL;
         return;
     }
 
+#ifdef CONFIG_UWP
+    qemu_host_emit_log(QEMU_HOST_LOG_DEBUG,
+                       "Vulkan/DZN: validating NV2A surface formats");
+#endif
+    if (!pgraph_vk_init_surfaces(pg, errp)) {
+        pgraph_vk_finalize_instance(pg);
+        g_free(pg->vk_renderer_state);
+        pg->vk_renderer_state = NULL;
+        return;
+    }
+
+#ifdef CONFIG_UWP
+    qemu_host_emit_log(QEMU_HOST_LOG_DEBUG,
+                       "Vulkan/DZN: initializing command buffers and buffers");
+#endif
     pgraph_vk_init_command_buffers(pg);
     pgraph_vk_init_buffers(d);
-    pgraph_vk_init_surfaces(pg);
+#ifdef CONFIG_UWP
+    qemu_host_emit_log(QEMU_HOST_LOG_DEBUG,
+                       "Vulkan/DZN: initializing shaders and pipelines");
+#endif
     pgraph_vk_init_shaders(pg);
     pgraph_vk_init_pipelines(pg);
+#ifdef CONFIG_UWP
+    qemu_host_emit_log(QEMU_HOST_LOG_DEBUG,
+                       "Vulkan/DZN: initializing textures and reports");
+#endif
     pgraph_vk_init_textures(pg);
     pgraph_vk_init_reports(pg);
+#ifdef CONFIG_UWP
+    qemu_host_emit_log(QEMU_HOST_LOG_DEBUG,
+                       "Vulkan/DZN: initializing compute and display");
+#endif
     pgraph_vk_init_compute(pg);
     pgraph_vk_init_display(pg);
 
@@ -75,6 +104,10 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
                                    memory_region_size(d->vram));
 
     pgraph_vk_determine_gpu_properties(d);
+#ifdef CONFIG_UWP
+    qemu_host_emit_log(QEMU_HOST_LOG_DEBUG,
+                       "Vulkan/DZN: renderer initialization complete");
+#endif
 }
 
 static void pgraph_vk_finalize(NV2AState *d)
@@ -215,6 +248,21 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
 #endif
 }
 
+#ifdef CONFIG_UWP
+static bool pgraph_vk_present_frame(NV2AState *d)
+{
+    PGRAPHState *pg = &d->pgraph;
+
+    qemu_mutex_lock(&d->pfifo.lock);
+    qemu_event_reset(&pg->sync_complete);
+    qatomic_set(&pg->sync_pending, true);
+    pfifo_kick(d);
+    qemu_mutex_unlock(&d->pfifo.lock);
+    qemu_event_wait(&pg->sync_complete);
+    return true;
+}
+#endif
+
 static PGRAPHRenderer pgraph_vk_renderer = {
     .type = CONFIG_DISPLAY_RENDERER_VULKAN,
     .name = "Vulkan",
@@ -241,6 +289,9 @@ static PGRAPHRenderer pgraph_vk_renderer = {
         .set_surface_scale_factor = pgraph_vk_set_surface_scale_factor,
         .get_surface_scale_factor = pgraph_vk_get_surface_scale_factor,
         .get_framebuffer_surface = pgraph_vk_get_framebuffer_surface,
+#ifdef CONFIG_UWP
+        .present_frame = pgraph_vk_present_frame,
+#endif
         .get_gpu_properties = pgraph_vk_get_gpu_properties,
     }
 };

@@ -2401,7 +2401,7 @@ endif
 vulkan = not_found
 libglslang = not_found
 
-if host_os == 'windows' and not is_uwp
+if host_os == 'windows'
   vulkan = declare_dependency(compile_args: ['-DVK_USE_PLATFORM_WIN32_KHR'])
 elif host_os == 'linux'
   vulkan = dependency('vulkan')

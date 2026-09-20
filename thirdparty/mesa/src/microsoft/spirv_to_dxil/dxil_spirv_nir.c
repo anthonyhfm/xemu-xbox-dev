@@ -545,7 +545,9 @@ discard_psiz_access(struct nir_builder *builder, nir_intrinsic_instr *intrin,
       return false;
 
    nir_variable *var = nir_intrinsic_get_var(intrin, 0);
-   if (!var || var->data.mode != nir_var_shader_out ||
+   if (!var ||
+       (var->data.mode != nir_var_shader_in &&
+        var->data.mode != nir_var_shader_out) ||
        var->data.location != VARYING_SLOT_PSIZ)
       return false;
 
@@ -584,7 +586,104 @@ dxil_spirv_nir_discard_point_size_var(nir_shader *shader)
       return false;
 
    nir_remove_dead_derefs(shader);
+   nir_remove_dead_variables(shader,
+                             nir_var_shader_in | nir_var_shader_out,
+                             NULL);
    return true;
+}
+
+struct lower_point_size_data {
+   const struct dxil_spirv_runtime_conf *conf;
+   nir_variable *position;
+   nir_variable *point_size;
+};
+
+static nir_def *
+load_viewport_size(nir_builder *b, const struct dxil_spirv_runtime_conf *conf)
+{
+   const unsigned offset =
+      offsetof(struct dxil_spirv_vertex_runtime_data, viewport_width);
+   nir_address_format format = nir_address_format_32bit_index_offset;
+   nir_def *index = nir_vulkan_resource_index(
+      b, nir_address_format_num_components(format),
+      nir_address_format_bit_size(format), nir_imm_int(b, 0),
+      .desc_set = conf->runtime_data_cbv.register_space,
+      .binding = conf->runtime_data_cbv.base_shader_register,
+      .desc_type = nir_descriptor_type_uniform_buffer);
+   nir_def *descriptor = nir_load_vulkan_descriptor(
+      b, nir_address_format_num_components(format),
+      nir_address_format_bit_size(format), index,
+      .desc_type = nir_descriptor_type_uniform_buffer);
+   return nir_trim_vector(
+      b, nir_load_ubo(b, 2, 32, nir_channel(b, descriptor, 0),
+                      nir_imm_int(b, offset), .align_mul = 4,
+                      .range_base = offset, .range = 8), 2);
+}
+
+static bool
+lower_point_size_emit(nir_builder *b, nir_instr *instr, void *cb_data)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   if (intr->intrinsic != nir_intrinsic_emit_vertex &&
+       intr->intrinsic != nir_intrinsic_emit_vertex_with_counter)
+      return false;
+   if (nir_intrinsic_stream_id(intr) != 0)
+      return false;
+
+   struct lower_point_size_data *data = cb_data;
+   b->cursor = nir_before_instr(instr);
+   nir_def *position = nir_load_var(b, data->position);
+   nir_def *point_size = nir_load_var(b, data->point_size);
+   nir_def *viewport = load_viewport_size(b, data->conf);
+   nir_def *clip_w = nir_channel(b, position, 3);
+   nir_def *half_extent = nir_fmul(
+      b, nir_fdiv(b, nir_vec2(b, point_size, point_size), viewport), clip_w);
+
+   static const int corners[4][2] = {
+      { -1, -1 }, { -1, 1 }, { 1, -1 }, { 1, 1 },
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(corners); i++) {
+      nir_def *new_position = nir_vec4(
+         b, nir_ffma(b, nir_channel(b, half_extent, 0),
+                     nir_imm_float(b, corners[i][0]),
+                     nir_channel(b, position, 0)),
+         nir_ffma(b, nir_channel(b, half_extent, 1),
+                     nir_imm_float(b, corners[i][1]),
+                     nir_channel(b, position, 1)),
+         nir_channel(b, position, 2), clip_w);
+      nir_store_var(b, data->position, new_position, 0xf);
+      nir_emit_vertex(b);
+   }
+   nir_end_primitive(b);
+   nir_instr_remove(instr);
+   return true;
+}
+
+static bool
+dxil_spirv_nir_lower_geometry_point_size(
+   nir_shader *shader, const struct dxil_spirv_runtime_conf *conf)
+{
+   if (shader->info.stage != MESA_SHADER_GEOMETRY ||
+       shader->info.gs.output_primitive != MESA_PRIM_POINTS)
+      return false;
+
+   struct lower_point_size_data data = {
+      .conf = conf,
+      .position = nir_find_variable_with_location(
+         shader, nir_var_shader_out, VARYING_SLOT_POS),
+      .point_size = nir_find_variable_with_location(
+         shader, nir_var_shader_out, VARYING_SLOT_PSIZ),
+   };
+   if (!data.position || !data.point_size)
+      return false;
+
+   shader->info.gs.output_primitive = MESA_PRIM_TRIANGLE_STRIP;
+   shader->info.gs.vertices_out *= 4;
+   return nir_shader_instructions_pass(shader, lower_point_size_emit,
+                                       nir_metadata_control_flow, &data);
 }
 
 struct lower_pntc_data {
@@ -1001,6 +1100,8 @@ dxil_spirv_nir_passes(nir_shader *nir,
       NIR_PASS(_, nir, nir_opt_access, &opt_access_options);
    }
 
+   NIR_PASS(metadata->requires_runtime_data, nir,
+            dxil_spirv_nir_lower_geometry_point_size, conf);
    NIR_PASS(_, nir, dxil_spirv_nir_discard_point_size_var);
 
    NIR_PASS(_, nir, nir_remove_dead_variables,

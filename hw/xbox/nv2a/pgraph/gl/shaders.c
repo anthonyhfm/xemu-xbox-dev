@@ -201,6 +201,7 @@ static void generate_shaders(PGRAPHGLState *r, ShaderBinding *binding)
         memset(&key, 0, sizeof(key));
         key.kind = GL_GEOMETRY_SHADER;
         key.geom.state = state->geom;
+        key.geom.glsl_opts.write_point_size = true;
         glAttachShader(program, get_shader_module_for_key(r, &key));
     }
 

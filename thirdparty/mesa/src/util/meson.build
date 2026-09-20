@@ -458,7 +458,6 @@ if with_uwp
   )
 
   idep_uwputil = declare_dependency(
-    link_whole : _libuwputil,
     link_with : _libuwputil,
   )
 

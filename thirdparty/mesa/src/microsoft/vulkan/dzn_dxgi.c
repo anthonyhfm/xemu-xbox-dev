@@ -31,6 +31,9 @@ VkResult
 dzn_enumerate_physical_devices_dxgi(struct vk_instance *instance)
 {
    IDXGIFactory4 *factory = dxgi_get_factory(false);
+   if (!factory)
+      return VK_ERROR_INCOMPATIBLE_DRIVER;
+
    IDXGIAdapter1 *adapter = NULL;
    VkResult result = VK_SUCCESS;
    for (UINT i = 0; SUCCEEDED(IDXGIFactory4_EnumAdapters1(factory, i, &adapter)); ++i) {
@@ -72,6 +75,13 @@ dxgi_get_factory(bool debug)
       { 0xbf, 0x0c, 0x21, 0xca, 0x39, 0xe5, 0x16, 0x8a }
    };
 
+#ifdef _XBOX_UWP
+   UINT flags = 0;
+   IDXGIFactory4 *factory = NULL;
+   HRESULT hr = CreateDXGIFactory2(flags, &IID_IDXGIFactory4,
+                                   (void **)&factory);
+   return SUCCEEDED(hr) ? factory : NULL;
+#else
    HMODULE dxgi_mod = LoadLibraryA("DXGI.DLL");
    if (!dxgi_mod) {
       mesa_loge("failed to load DXGI.DLL\n");
@@ -105,4 +115,5 @@ dxgi_get_factory(bool debug)
    }
 
    return factory;
+#endif
 }

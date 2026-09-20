@@ -26,6 +26,7 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/pgraph/swizzle.h"
 #include "qemu/compiler.h"
+#include "qemu/qemu-host.h"
 #include "ui/xemu-settings.h"
 #include "renderer.h"
 
@@ -122,6 +123,130 @@ static void memcpy_image(void *dst, void const *src, int dst_stride,
     }
 }
 
+#ifdef CONFIG_UWP
+static uint8_t expand_5_to_8(uint32_t value)
+{
+    return (value << 3) | (value >> 2);
+}
+
+static uint8_t expand_6_to_8(uint32_t value)
+{
+    return (value << 2) | (value >> 4);
+}
+
+static void convert_xbox_color_to_bgra8(const SurfaceBinding *surface,
+                                        uint8_t *dst, const uint8_t *src)
+{
+    unsigned int format = surface->shape.color_format;
+    for (unsigned int y = 0; y < surface->height; y++) {
+        const uint8_t *src_row = src + y * surface->pitch;
+        uint8_t *dst_row = dst + y * surface->width * 4;
+        for (unsigned int x = 0; x < surface->width; x++, dst_row += 4) {
+            switch (format) {
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5: {
+                uint16_t pixel;
+                memcpy(&pixel, src_row + x * 2, sizeof(pixel));
+                dst_row[0] = expand_5_to_8(pixel & 0x1f);
+                dst_row[1] = expand_5_to_8((pixel >> 5) & 0x1f);
+                dst_row[2] = expand_5_to_8((pixel >> 10) & 0x1f);
+                dst_row[3] = 0xff;
+                break;
+            }
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5: {
+                uint16_t pixel;
+                memcpy(&pixel, src_row + x * 2, sizeof(pixel));
+                dst_row[0] = expand_5_to_8(pixel & 0x1f);
+                dst_row[1] = expand_6_to_8((pixel >> 5) & 0x3f);
+                dst_row[2] = expand_5_to_8((pixel >> 11) & 0x1f);
+                dst_row[3] = 0xff;
+                break;
+            }
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_B8:
+                dst_row[0] = src_row[x];
+                dst_row[1] = dst_row[2] = 0;
+                dst_row[3] = 0xff;
+                break;
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_G8B8:
+                dst_row[0] = src_row[x * 2];
+                dst_row[1] = src_row[x * 2 + 1];
+                dst_row[2] = 0;
+                dst_row[3] = 0xff;
+                break;
+            default:
+                memcpy(dst_row, src_row + x * 4, 4);
+                break;
+            }
+        }
+    }
+}
+
+static void convert_bgra8_to_xbox_color(const SurfaceBinding *surface,
+                                        uint8_t *dst, const uint8_t *src)
+{
+    unsigned int format = surface->shape.color_format;
+    for (unsigned int y = 0; y < surface->height; y++) {
+        uint8_t *dst_row = dst + y * surface->pitch;
+        const uint8_t *src_row = src + y * surface->width * 4;
+        for (unsigned int x = 0; x < surface->width; x++, src_row += 4) {
+            switch (format) {
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5: {
+                uint16_t pixel = ((src_row[2] >> 3) << 10) |
+                                 ((src_row[1] >> 3) << 5) |
+                                 (src_row[0] >> 3);
+                memcpy(dst_row + x * 2, &pixel, sizeof(pixel));
+                break;
+            }
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5: {
+                uint16_t pixel = ((src_row[2] >> 3) << 11) |
+                                 ((src_row[1] >> 2) << 5) |
+                                 (src_row[0] >> 3);
+                memcpy(dst_row + x * 2, &pixel, sizeof(pixel));
+                break;
+            }
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_B8:
+                dst_row[x] = src_row[0];
+                break;
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_G8B8:
+                dst_row[x * 2] = src_row[0];
+                dst_row[x * 2 + 1] = src_row[1];
+                break;
+            default:
+                memcpy(dst_row + x * 4, src_row, 4);
+                break;
+            }
+        }
+    }
+}
+
+static void convert_xbox_z16_to_d32(const SurfaceBinding *surface,
+                                    float *dst, const uint8_t *src)
+{
+    for (unsigned int y = 0; y < surface->height; y++) {
+        const uint8_t *src_row = src + y * surface->pitch;
+        float *dst_row = dst + y * surface->width;
+        for (unsigned int x = 0; x < surface->width; x++) {
+            uint16_t depth;
+            memcpy(&depth, src_row + x * sizeof(depth), sizeof(depth));
+            dst_row[x] = depth / 65535.0f;
+        }
+    }
+}
+
+static void convert_d32_to_xbox_z16(const SurfaceBinding *surface,
+                                    uint8_t *dst, const float *src)
+{
+    for (unsigned int y = 0; y < surface->height; y++) {
+        uint8_t *dst_row = dst + y * surface->pitch;
+        const float *src_row = src + y * surface->width;
+        for (unsigned int x = 0; x < surface->width; x++) {
+            float value = CLAMP(src_row[x], 0.0f, 1.0f);
+            uint16_t depth = (uint16_t)(value * 65535.0f + 0.5f);
+            memcpy(dst_row + x * sizeof(depth), &depth, sizeof(depth));
+        }
+    }
+}
+#endif
+
 static bool check_surface_overlaps_range(const SurfaceBinding *surface,
                                          hwaddr range_start, hwaddr range_len)
 {
@@ -162,7 +287,13 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
 
     bool no_conversion_necessary =
         surface->color || use_compute_to_convert_depth_stencil_format ||
-        surface->host_fmt.vk_format == VK_FORMAT_D16_UNORM;
+        surface->host_fmt.vk_format == VK_FORMAT_D16_UNORM
+#ifdef CONFIG_UWP
+        || (surface->shape.zeta_format ==
+                NV097_SET_SURFACE_FORMAT_ZETA_Z16 &&
+            surface->host_fmt.vk_format == VK_FORMAT_D32_SFLOAT)
+#endif
+        ;
 
     assert(no_conversion_necessary);
 
@@ -455,9 +586,22 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
                             r->storage_buffers[BUFFER_STAGING_DST].allocation,
                             0, VK_WHOLE_SIZE);
 
-    memcpy_image(gl_read_buf, mapped_memory_ptr, surface->pitch,
-                 surface->width * surface->fmt.bytes_per_pixel,
-                 surface->height);
+#ifdef CONFIG_UWP
+    if (surface->color && surface->host_fmt.host_bytes_per_pixel !=
+                              surface->fmt.bytes_per_pixel) {
+        convert_bgra8_to_xbox_color(surface, gl_read_buf, mapped_memory_ptr);
+    } else if (!surface->color &&
+               surface->shape.zeta_format ==
+                   NV097_SET_SURFACE_FORMAT_ZETA_Z16 &&
+               surface->host_fmt.vk_format == VK_FORMAT_D32_SFLOAT) {
+        convert_d32_to_xbox_z16(surface, gl_read_buf, mapped_memory_ptr);
+    } else
+#endif
+    {
+        memcpy_image(gl_read_buf, mapped_memory_ptr, surface->pitch,
+                     surface->width * surface->fmt.bytes_per_pixel,
+                     surface->height);
+    }
 
     vmaUnmapMemory(r->allocator,
                    r->storage_buffers[BUFFER_STAGING_DST].allocation);
@@ -785,7 +929,7 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
         .format = surface->host_fmt.vk_format,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+        .usage = (surface->color ? VK_IMAGE_USAGE_SAMPLED_BIT : 0) |
                  VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | surface->host_fmt.usage,
         .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -794,11 +938,36 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
 
     VmaAllocationCreateInfo alloc_create_info = {
         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+#ifdef CONFIG_UWP
+        /*
+         * DZN maps dedicated image allocations to committed D3D12 resources.
+         * Depth/stencil images cannot reliably share the generic placed-resource
+         * heaps selected by VMA in the UWP D3D12 driver.
+         */
+        .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
+#endif
     };
 
-    VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
-                            &alloc_create_info, &surface->image,
-                            &surface->allocation, NULL));
+    VkResult image_result = vmaCreateImage(
+        r->allocator, &image_create_info, &alloc_create_info,
+        &surface->image, &surface->allocation, NULL);
+#ifdef CONFIG_UWP
+    if (image_result != VK_SUCCESS) {
+        char message[320];
+        snprintf(message, sizeof(message),
+                 "Vulkan/DZN surface image rejected: result=%d "
+                 "format=%d extent=%ux%u usage=0x%x aspect=0x%x "
+                 "color=%d guest-format=0x%x scale=%d",
+                 image_result, image_create_info.format, width, height,
+                 image_create_info.usage, surface->host_fmt.aspect,
+                 surface->color,
+                 surface->color ? surface->shape.color_format :
+                                  surface->shape.zeta_format,
+                 pg->surface_scale_factor);
+        qemu_host_emit_log(QEMU_HOST_LOG_ERROR, message);
+    }
+#endif
+    VK_CHECK(image_result);
 
     VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
                             &alloc_create_info, &surface->image_scratch,
@@ -996,7 +1165,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
 
     StorageBuffer *copy_buffer = &r->storage_buffers[BUFFER_STAGING_SRC];
     size_t uploaded_image_size = surface->height * surface->width *
-                                 surface->fmt.bytes_per_pixel;
+                                 surface->host_fmt.host_bytes_per_pixel;
     assert(uploaded_image_size <= copy_buffer->buffer_size);
 
     void *mapped_memory_ptr = NULL;
@@ -1009,12 +1178,31 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
 
     bool no_conversion_necessary =
         surface->color || surface->host_fmt.vk_format == VK_FORMAT_D16_UNORM ||
-        use_compute_to_convert_depth_stencil_format;
+        use_compute_to_convert_depth_stencil_format
+#ifdef CONFIG_UWP
+        || (surface->shape.zeta_format ==
+                NV097_SET_SURFACE_FORMAT_ZETA_Z16 &&
+            surface->host_fmt.vk_format == VK_FORMAT_D32_SFLOAT)
+#endif
+        ;
     assert(no_conversion_necessary);
 
-    memcpy_image(mapped_memory_ptr, gl_read_buf,
-                 surface->width * surface->fmt.bytes_per_pixel, surface->pitch,
-                 surface->height);
+#ifdef CONFIG_UWP
+    if (surface->color && surface->host_fmt.host_bytes_per_pixel !=
+                              surface->fmt.bytes_per_pixel) {
+        convert_xbox_color_to_bgra8(surface, mapped_memory_ptr, gl_read_buf);
+    } else if (!surface->color &&
+               surface->shape.zeta_format ==
+                   NV097_SET_SURFACE_FORMAT_ZETA_Z16 &&
+               surface->host_fmt.vk_format == VK_FORMAT_D32_SFLOAT) {
+        convert_xbox_z16_to_d32(surface, mapped_memory_ptr, gl_read_buf);
+    } else
+#endif
+    {
+        memcpy_image(mapped_memory_ptr, gl_read_buf,
+                     surface->width * surface->fmt.bytes_per_pixel,
+                     surface->pitch, surface->height);
+    }
 
     vmaFlushAllocation(r->allocator, copy_buffer->allocation, 0, VK_WHOLE_SIZE);
     vmaUnmapMemory(r->allocator, copy_buffer->allocation);
@@ -1318,7 +1506,13 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
         assert(pg->surface_shape.color_format <
                ARRAY_SIZE(kelvin_surface_color_format_vk_map));
         fmt = kelvin_surface_color_format_map[pg->surface_shape.color_format];
-        host_fmt = kelvin_surface_color_format_vk_map[pg->surface_shape.color_format];
+#ifdef CONFIG_UWP
+        host_fmt = kelvin_surface_color_format_uwp_vk_map[
+            pg->surface_shape.color_format];
+#else
+        host_fmt = kelvin_surface_color_format_vk_map[
+            pg->surface_shape.color_format];
+#endif
         if (host_fmt.host_bytes_per_pixel == 0) {
             fprintf(stderr, "nv2a: unimplemented color surface format 0x%x\n",
                     pg->surface_shape.color_format);
@@ -1682,28 +1876,55 @@ static bool check_surface_internal_formats_supported(
     bool all_supported = true;
     for (int i = 0; i < count; i++) {
         const SurfaceFormatInfo *f = &fmts[i];
-        if (f->host_bytes_per_pixel) {
-            all_supported &=
-                check_format_and_usage_supported(r, f->vk_format, f->usage);
+        if (f->host_bytes_per_pixel &&
+            !check_format_and_usage_supported(
+                r, f->vk_format,
+                f->usage | VK_IMAGE_USAGE_SAMPLED_BIT |
+                    VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+            all_supported = false;
+#ifdef CONFIG_UWP
+            char message[192];
+            snprintf(message, sizeof(message),
+                     "Vulkan/DZN does not support surface format %d with "
+                     "usage 0x%x (table index %d)",
+                     f->vk_format, f->usage, i);
+            qemu_host_emit_log(QEMU_HOST_LOG_WARNING, message);
+#endif
         }
     }
     return all_supported;
 }
 
-void pgraph_vk_init_surfaces(PGRAPHState *pg)
+bool pgraph_vk_init_surfaces(PGRAPHState *pg, Error **errp)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     // Make sure all surface format types are supported. We don't expect issue
     // with these, and therefore have no fallback mechanism.
     bool color_formats_supported = check_surface_internal_formats_supported(
+#ifdef CONFIG_UWP
+        r, kelvin_surface_color_format_uwp_vk_map,
+        ARRAY_SIZE(kelvin_surface_color_format_uwp_vk_map));
+#else
         r, kelvin_surface_color_format_vk_map,
         ARRAY_SIZE(kelvin_surface_color_format_vk_map));
-    assert(color_formats_supported);
+#endif
+    if (!color_formats_supported) {
+        error_setg(errp,
+                   "Vulkan/DZN does not support all NV2A render-target "
+                   "formats; falling back to OpenGL");
+        return false;
+    }
 
     // Check if the device supports preferred VK_FORMAT_D24_UNORM_S8_UINT
     // format, fall back to D32_SFLOAT_S8_UINT otherwise.
+#ifdef CONFIG_UWP
+    r->kelvin_surface_zeta_vk_map[NV097_SET_SURFACE_FORMAT_ZETA_Z16] =
+        zeta_d32_sfloat;
+#else
     r->kelvin_surface_zeta_vk_map[NV097_SET_SURFACE_FORMAT_ZETA_Z16] = zeta_d16;
+#endif
     if (check_surface_internal_formats_supported(r, &zeta_d24_unorm_s8_uint,
                                                  1)) {
         r->kelvin_surface_zeta_vk_map[NV097_SET_SURFACE_FORMAT_ZETA_Z24S8] =
@@ -1713,7 +1934,10 @@ void pgraph_vk_init_surfaces(PGRAPHState *pg)
         r->kelvin_surface_zeta_vk_map[NV097_SET_SURFACE_FORMAT_ZETA_Z24S8] =
             zeta_d32_sfloat_s8_uint;
     } else {
-        assert(!"No suitable depth-stencil format supported");
+        error_setg(errp,
+                   "Vulkan/DZN does not provide a compatible depth-stencil "
+                   "format; falling back to OpenGL");
+        return false;
     }
 
     QTAILQ_INIT(&r->surfaces);
@@ -1728,6 +1952,8 @@ void pgraph_vk_init_surfaces(PGRAPHState *pg)
     r->framebuffer_dirty = true;
 
     pgraph_vk_reload_surface_scale_factor(pg); // FIXME: Move internal
+
+    return true;
 }
 
 void pgraph_vk_finalize_surfaces(PGRAPHState *pg)

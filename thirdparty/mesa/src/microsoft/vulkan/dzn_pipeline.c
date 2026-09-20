@@ -2061,7 +2061,20 @@ dzn_graphics_pipeline_create(struct dzn_device *device,
                                                &IID_ID3D12PipelineState,
                                                (void **)&pipeline->base.state);
       if (FAILED(hres)) {
+         mesa_loge("DZN: ID3D12Device4::CreatePipelineState failed "
+                   "(HRESULT=0x%08x, stages=%u, render-targets=%u, "
+                   "depth-format=%u)\n",
+                   (unsigned)hres, pCreateInfo->stageCount, color_count,
+                   (unsigned)zs_fmt);
+         /* UWP has no stderr/debug layer on retail devices. Preserve the
+          * native D3D12 failure value so an embedding host can diagnose the
+          * rejected PSO instead of seeing the misleading generic -1. This is
+          * only used on the failure path and is never exposed as success. */
+#ifdef _XBOX_UWP
+         ret = (VkResult)(int32_t)hres;
+#else
          ret = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+#endif
          goto out;
       }
 

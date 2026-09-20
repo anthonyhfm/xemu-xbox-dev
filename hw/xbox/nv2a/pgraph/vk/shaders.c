@@ -270,6 +270,14 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
         key.kind = VK_SHADER_STAGE_GEOMETRY_BIT;
         key.geom.state = binding->state.geom;
         key.geom.glsl_opts.vulkan = true;
+        /* PointSize is only meaningful when this GS emits points. Carrying
+         * it through triangle and line signatures is unnecessary and is
+         * rejected by retail D3D12 drivers used by DZN. Point-output shaders
+         * retain it and are lowered by Mesa to D3D12-compatible quads. */
+        key.geom.glsl_opts.write_point_size =
+            binding->state.geom.polygon_front_mode == POLY_MODE_POINT &&
+            r->enabled_physical_device_features
+                .shaderTessellationAndGeometryPointSize == VK_TRUE;
         binding->geom.module_info = get_and_ref_shader_module_for_key(r, &key);
     } else {
         binding->geom.module_info = NULL;

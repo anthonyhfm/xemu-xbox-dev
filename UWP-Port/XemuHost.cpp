@@ -134,9 +134,10 @@ int ExceptionToErrno(Platform::Exception^ exception)
 
 XemuHost::XemuHost()
     : m_module(nullptr), m_sdlModule(nullptr), m_openGLModule(nullptr),
-      m_mesaModule(nullptr),
+      m_mesaModule(nullptr), m_vulkanModule(nullptr),
       m_running(false), m_stop(false), m_firstFrameLogged(false),
       m_attachMesa(nullptr), m_setMesaSwapChainAttach(nullptr),
+      m_attachDzn(nullptr), m_setDznSwapChainAttach(nullptr),
       m_updateSDLPanelSize(nullptr), m_attachVirtualJoystick(nullptr),
       m_detachVirtualJoystick(nullptr), m_openJoystick(nullptr),
       m_closeJoystick(nullptr), m_setVirtualAxis(nullptr),
@@ -151,6 +152,7 @@ XemuHost::XemuHost()
       m_requestStop(nullptr), m_pause(nullptr),
       m_resume(nullptr), m_reset(nullptr), m_shutdown(nullptr), m_join(nullptr), m_cleanup(nullptr),
       m_registerLog(nullptr), m_setLogFile(nullptr),
+      m_setPipelineCacheFile(nullptr),
       m_registerBrokeredStorage(nullptr), m_mountFile(nullptr),
       m_mountFolder(nullptr)
 {
@@ -183,6 +185,9 @@ XemuHost::~XemuHost()
     if (m_mesaModule) {
         FreeLibrary(m_mesaModule);
     }
+    if (m_vulkanModule) {
+        FreeLibrary(m_vulkanModule);
+    }
 }
 
 bool XemuHost::AttachRenderPanel(Windows::UI::Xaml::Controls::SwapChainPanel^ panel)
@@ -214,8 +219,15 @@ bool XemuHost::AttachRenderPanel(Windows::UI::Xaml::Controls::SwapChainPanel^ pa
         WriteDiagnostic("[loader] opengl32.dll failed with Win32 error " +
                         std::to_string(GetLastError()));
     }
-    if (!m_sdlModule || !m_mesaModule || !m_openGLModule) {
-        SetError("Failed to load SDL3.dll, opengl32.dll, or gallium_wgl.dll while preparing the renderer");
+    if (!m_vulkanModule) {
+        m_vulkanModule = LoadPackagedLibrary(L"vulkan_dzn.dll", 0);
+    }
+    if (!m_vulkanModule) {
+        WriteDiagnostic("[loader] vulkan_dzn.dll failed with Win32 error " +
+                        std::to_string(GetLastError()));
+    }
+    if (!m_sdlModule || !m_mesaModule || !m_openGLModule || !m_vulkanModule) {
+        SetError("Failed to load SDL3, Mesa OpenGL, or Mesa DZN while preparing the renderers");
         return false;
     }
 
@@ -230,6 +242,10 @@ bool XemuHost::AttachRenderPanel(Windows::UI::Xaml::Controls::SwapChainPanel^ pa
         GetProcAddress(m_mesaModule, "uwp_set_window_reference"));
     m_setMesaSwapChainAttach = reinterpret_cast<SetMesaSwapChainAttach>(
         GetProcAddress(m_mesaModule, "mesa_uwp_set_swapchain_attach_callback"));
+    m_attachDzn = reinterpret_cast<AttachMesa>(
+        GetProcAddress(m_vulkanModule, "uwp_set_window_reference"));
+    m_setDznSwapChainAttach = reinterpret_cast<SetMesaSwapChainAttach>(
+        GetProcAddress(m_vulkanModule, "mesa_uwp_set_swapchain_attach_callback"));
     m_updateSDLPanelSize = reinterpret_cast<UpdateSDLPanelSize>(
         GetProcAddress(m_sdlModule, "SDL_WinRTUpdateXAMLPanelSize"));
     auto setSDLLog = reinterpret_cast<SetSDLLog>(
@@ -237,6 +253,7 @@ bool XemuHost::AttachRenderPanel(Windows::UI::Xaml::Controls::SwapChainPanel^ pa
     auto setMesaLog = reinterpret_cast<SetMesaLog>(
         GetProcAddress(m_mesaModule, "mesa_uwp_set_log_callback"));
     if (!attachSDL || !m_attachMesa || !m_setMesaSwapChainAttach ||
+        !m_attachDzn || !m_setDznSwapChainAttach ||
         !m_updateSDLPanelSize ||
         !setSDLLog || !setMesaLog) {
         SetError("SDL3/Mesa do not expose the expected XAML embedding API");
@@ -259,7 +276,9 @@ bool XemuHost::AttachRenderPanel(Windows::UI::Xaml::Controls::SwapChainPanel^ pa
     setMesaLog(&XemuHost::MesaLog, this);
     m_renderPanel = panel;
     m_setMesaSwapChainAttach(&XemuHost::AttachMesaSwapChain, this);
+    m_setDznSwapChainAttach(&XemuHost::AttachMesaSwapChain, this);
     m_attachMesa(inspectable, width, height);
+    m_attachDzn(inspectable, width, height);
     if (!attachSDL(inspectable)) {
         SetError("SDL3 rejected the XAML host SwapChainPanel");
         return false;
@@ -529,24 +548,33 @@ long __cdecl XemuHost::AttachMesaSwapChain(void* opaque, void* swapchain)
         return attach();
     }
 
-    HRESULT result = E_FAIL;
     try {
-        auto operation = panel->Dispatcher->RunAsync(
+        panel->Dispatcher->RunAsync(
             Windows::UI::Core::CoreDispatcherPriority::High,
-            ref new Windows::UI::Core::DispatchedHandler([&result, attach]() {
-                result = attach();
+            ref new Windows::UI::Core::DispatchedHandler([host, attach]() {
+                HRESULT result = attach();
+                if (FAILED(result)) {
+                    host->WriteDiagnostic(
+                        "[display] Failed to attach renderer swapchain on the UI thread: " +
+                        std::to_string(result));
+                }
             }));
-        concurrency::create_task(operation).wait();
     } catch (Platform::Exception^ exception) {
-        result = exception->HResult;
+        return exception->HResult;
     }
-    return result;
+    /*
+     * Do not wait here. Vulkan can recreate its swapchain while the XAML thread
+     * is synchronously waiting for an emulation frame; waiting for RunAsync in
+     * that situation deadlocks both threads. The ComPtr captured by attach
+     * keeps the DXGI swapchain alive until the UI dispatcher installs it.
+     */
+    return S_OK;
 }
 
 bool XemuHost::UpdateRenderPanelSize(
     Windows::UI::Xaml::Controls::SwapChainPanel^ panel)
 {
-    if (!panel || !m_attachMesa || !m_updateSDLPanelSize) {
+    if (!panel || !m_attachMesa || !m_attachDzn || !m_updateSDLPanelSize) {
         return false;
     }
 
@@ -563,6 +591,8 @@ bool XemuHost::UpdateRenderPanelSize(
 
     m_attachMesa(reinterpret_cast<IInspectable *>(panel),
                  pixelWidth, pixelHeight);
+    m_attachDzn(reinterpret_cast<IInspectable *>(panel),
+                pixelWidth, pixelHeight);
     if (!m_updateSDLPanelSize(logicalWidth, logicalHeight,
                               pixelWidth, pixelHeight)) {
         return false;
@@ -648,6 +678,7 @@ bool XemuHost::Load()
               Resolve(m_cleanup, "qemu_host_cleanup") &&
               Resolve(m_registerLog, "qemu_host_register_log_callback") &&
               Resolve(m_setLogFile, "qemu_host_set_log_file") &&
+              Resolve(m_setPipelineCacheFile, "qemu_host_set_pipeline_cache_file") &&
               Resolve(m_setGamepadState, "qemu_host_set_gamepad_state") &&
               Resolve(m_registerBrokeredStorage, "qemu_host_register_brokered_storage_callbacks") &&
               Resolve(m_mountFile, "qemu_host_mount_brokered_file") &&
@@ -659,6 +690,10 @@ bool XemuHost::Load()
     WriteDiagnostic("[loader] Embedding API is compatible");
     m_registerLog(&XemuHost::Log, this);
     WriteDiagnostic("[loader] xemu log callback registered");
+    auto pipelineCachePath = ApplicationData::Current->LocalFolder->Path +
+                             "\\vulkan-pipeline.cache";
+    auto pipelineCacheUtf8 = ToUtf8(pipelineCachePath);
+    m_setPipelineCacheFile(pipelineCacheUtf8.c_str());
 
     QemuHostBrokeredStorageCallbacks storage{};
     storage.size = sizeof(storage);
@@ -807,13 +842,13 @@ bool XemuHost::RenderFrame()
     }
     bool firstFrame = !m_firstFrameLogged.exchange(true);
     if (firstFrame) {
-        WriteDiagnostic("[display] First OpenGL frame started on the XAML thread");
+        WriteDiagnostic("[display] First renderer frame started on the XAML thread");
     }
     int rc = m_renderFrame();
     if (firstFrame) {
         WriteDiagnostic(rc == 0 ?
-            "[display] First OpenGL frame presented" :
-            "[display] First OpenGL frame failed: " + std::to_string(rc));
+            "[display] First renderer frame presented" :
+            "[display] First renderer frame failed: " + std::to_string(rc));
     }
     return rc == 0;
 }
@@ -821,8 +856,11 @@ bool XemuHost::RenderFrame()
 bool XemuHost::MountFile(const std::string& virtualPath, StorageFile^ file,
                          IRandomAccessStream^ stream)
 {
-    if (!file || !stream || !Load()) {
+    if (!file || !stream) {
         SetError("Failed to prepare " + virtualPath + " for mounting");
+        return false;
+    }
+    if (!Load()) {
         return false;
     }
     int rc = m_mountFile(virtualPath.c_str(), reinterpret_cast<IInspectable*>(file),
@@ -839,8 +877,11 @@ bool XemuHost::MountFile(const std::string& virtualPath, StorageFile^ file,
 bool XemuHost::MountFolder(const std::string& virtualPath,
                            StorageFolder^ folder)
 {
-    if (!folder || !Load()) {
+    if (!folder) {
         SetError("Failed to prepare " + virtualPath + " for mounting");
+        return false;
+    }
+    if (!Load()) {
         return false;
     }
     int rc = m_mountFolder(virtualPath.c_str(),

@@ -20,6 +20,10 @@
 #ifndef HW_XBOX_NV2A_PGRAPH_VK_DEBUG_H
 #define HW_XBOX_NV2A_PGRAPH_VK_DEBUG_H
 
+#ifdef CONFIG_UWP
+#include "qemu/qemu-host.h"
+#endif
+
 #define DEBUG_VK 0
 
 extern int nv2a_vk_dgroup_indent;
@@ -46,14 +50,40 @@ extern int nv2a_vk_dgroup_indent;
         assert(nv2a_vk_dgroup_indent >= 0); \
     } while (0)
 
-#define VK_CHECK(x)                                           \
-    do {                                                      \
-        VkResult vk_result = (x);                             \
-        if (vk_result != VK_SUCCESS) {                        \
-            fprintf(stderr, "vk_result = %d\n", vk_result);   \
-        }                                                     \
-        assert(vk_result == VK_SUCCESS && "vk check failed"); \
+#define VK_CHECK(x)                                                     \
+    do {                                                                \
+        VkResult vk_result = (x);                                       \
+        if (vk_result != VK_SUCCESS) {                                  \
+            fprintf(stderr, "vk_result = %d\n", vk_result);             \
+            /* stderr is not observable in an embedded UWP process. */  \
+            /* Preserve the exact failing call in the host log. */      \
+            do {                                                        \
+                /* Keep desktop builds independent of the host API. */  \
+                /* clang-format off */                                  \
+                QEMU_HOST_VK_CHECK_LOG(#x, vk_result, __FILE__,          \
+                                       __LINE__);                        \
+                /* clang-format on */                                   \
+            } while (0);                                                \
+        }                                                               \
+        assert(vk_result == VK_SUCCESS && "vk check failed");           \
     } while (0)
+
+#ifdef CONFIG_UWP
+static inline void qemu_host_vk_check_log(const char *expression,
+                                          VkResult result,
+                                          const char *file, int line)
+{
+    char message[512];
+    snprintf(message, sizeof(message),
+             "Vulkan/DZN call failed: %s returned %d at %s:%d",
+             expression, result, file, line);
+    qemu_host_emit_log(QEMU_HOST_LOG_ERROR, message);
+}
+#define QEMU_HOST_VK_CHECK_LOG(expr, result, file, line) \
+    qemu_host_vk_check_log(expr, result, file, line)
+#else
+#define QEMU_HOST_VK_CHECK_LOG(expr, result, file, line) ((void)0)
+#endif
 
 void pgraph_vk_debug_frame_terminator(void);
 

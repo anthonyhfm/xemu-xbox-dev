@@ -41,7 +41,11 @@
 #include "constants.h"
 #include "glsl.h"
 
+#ifdef CONFIG_UWP
+#define HAVE_EXTERNAL_MEMORY 0
+#else
 #define HAVE_EXTERNAL_MEMORY 1
+#endif
 
 typedef struct QueueFamilyIndices {
     int queue_family;
@@ -294,6 +298,17 @@ typedef struct PGRAPHVkDisplayState {
 #endif
     GLuint gl_memory_obj;
     GLuint gl_texture_id;
+
+#ifdef CONFIG_UWP
+    VkSurfaceKHR surface;
+    VkSwapchainKHR swapchain;
+    VkFormat swapchain_format;
+    VkExtent2D swapchain_extent;
+    VkImage *swapchain_images;
+    bool *swapchain_image_initialized;
+    uint32_t swapchain_image_count;
+    VkFence acquire_fence;
+#endif
 } PGRAPHVkDisplayState;
 
 typedef struct ComputePipelineKey {
@@ -506,7 +521,7 @@ VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
                                                    size_t count);
 
 // surface.c
-void pgraph_vk_init_surfaces(PGRAPHState *pg);
+bool pgraph_vk_init_surfaces(PGRAPHState *pg, Error **errp);
 void pgraph_vk_finalize_surfaces(PGRAPHState *pg);
 void pgraph_vk_surface_flush(NV2AState *d);
 void pgraph_vk_process_pending_downloads(NV2AState *d);

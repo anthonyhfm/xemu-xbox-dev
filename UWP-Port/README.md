@@ -5,14 +5,17 @@ an embedded DLL on Windows and Xbox in Developer Mode. It owns the application
 lifecycle, brokered file access, controller input, settings, logs, and the XAML
 render surface.
 
-The graphics path is:
+The two graphics paths are:
 
 ```text
 xemu NV2A -> OpenGL -> Mesa Gallium D3D12 -> D3D12/DXGI -> SwapChainPanel
+xemu NV2A -> Vulkan -> Mesa DZN -> D3D12/DXGI -> SwapChainPanel
 ```
 
-The UWP host does not use Vulkan. SDL3 supplies the UWP platform and input
-integration. Mesa supplies OpenGL through the Gallium D3D12 driver.
+SDL3 supplies the UWP platform and input integration. Mesa supplies OpenGL
+through Gallium D3D12 and a native Vulkan ICD through DZN. The Vulkan path
+creates a composition swapchain and attaches it directly to the XAML
+`SwapChainPanel`; it does not pass Vulkan frames through OpenGL.
 
 ## Requirements
 
@@ -34,6 +37,7 @@ Before building the host, prepare these artifacts:
 build-uwp-embed/qemu-system-i386.dll
 build-uwp/mesa/src/gallium/targets/libgl-gdi/opengl32.dll
 build-uwp/mesa/src/gallium/targets/wgl/gallium_wgl.dll
+build-uwp/mesa/src/microsoft/vulkan/vulkan_dzn.dll
 ```
 
 The SDL3 include/runtime directory and MSYS2 UCRT64 runtime directory are
@@ -47,6 +51,10 @@ The packaged application must contain at least:
 qemu-system-i386.dll
 opengl32.dll
 gallium_wgl.dll
+vulkan_dzn.dll
+glslang.dll
+libSPIRV-Tools.dll
+libSPIRV-Tools-opt.dll
 SDL3.dll
 dxil.dll
 libslirp-0.dll
@@ -65,9 +73,7 @@ cd build-uwp-embed
   --target-list=i386-softmmu \
   --enable-uwp \
   --enable-sdl \
-  --enable-opengl \
-  --disable-vulkan \
-  --disable-llvm
+  --enable-opengl
 ninja
 ```
 
@@ -85,11 +91,13 @@ Build Mesa for Windows/UWP x64 with:
 - OpenGL enabled
 - Gallium D3D12 graphics enabled
 - Gallium D3D12 video enabled
-- Vulkan drivers disabled
+- Vulkan DZN (`microsoft-experimental`) enabled
 - LLVM disabled when the internal DXIL compiler is available
 
 Place or configure the Mesa outputs so the host project can package
-`opengl32.dll` and `gallium_wgl.dll` from the expected build tree.
+`opengl32.dll`, `gallium_wgl.dll`, and `vulkan_dzn.dll` from the expected build
+tree. DZN is loaded as the packaged Vulkan ICD when Vulkan is selected in the
+Settings page; it does not depend on the desktop Vulkan loader or registry.
 
 ## Build and package UWP-Port
 
@@ -129,8 +137,9 @@ creating an update for an already installed PC or Xbox package.
 The `Build UWP-Port` workflow performs the complete x64 Release build on a
 Windows runner. It checks out `rodrigoandrigo/SDL3_UWP`, builds its WinRT
 project, builds the xemu embedding DLL, strips unneeded symbols from that DLL,
-builds Mesa Gallium D3D12, packages UWP-Port, and uploads the MSIX, certificate,
-symbols, and framework dependencies as the `UWP-Port-x64-Release` artifact.
+builds Mesa Gallium D3D12 and Vulkan DZN, packages UWP-Port, and uploads the
+MSIX, certificate, symbols, and framework dependencies as the
+`UWP-Port-x64-Release` artifact.
 
 The workflow runs when relevant sources change and can also be started manually
 from the GitHub Actions page.

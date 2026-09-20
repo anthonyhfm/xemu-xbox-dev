@@ -19,8 +19,35 @@
 
 #include "qemu/osdep.h"
 #include "qemu/fast-hash.h"
+#include "qemu/qemu-host.h"
 #include "renderer.h"
 #include <math.h>
+
+#ifdef CONFIG_UWP
+static unsigned int uwp_pipeline_cache_updates;
+static bool uwp_pipeline_rejection_reported;
+
+static void save_uwp_pipeline_cache(PGRAPHVkState *r)
+{
+    g_autofree char *cache_path = qemu_host_dup_pipeline_cache_file();
+    size_t cache_size = 0;
+
+    if (!cache_path ||
+        vkGetPipelineCacheData(r->device, r->vk_pipeline_cache,
+                               &cache_size, NULL) != VK_SUCCESS ||
+        cache_size == 0 || cache_size > 64 * MiB) {
+        return;
+    }
+
+    g_autofree char *cache_data = g_malloc(cache_size);
+    if (vkGetPipelineCacheData(r->device, r->vk_pipeline_cache,
+                               &cache_size, cache_data) == VK_SUCCESS &&
+        g_file_set_contents(cache_path, cache_data, cache_size, NULL)) {
+        qemu_host_emit_log(QEMU_HOST_LOG_DEBUG,
+                           "Vulkan/DZN: pipeline cache saved");
+    }
+}
+#endif
 
 void pgraph_vk_draw_begin(NV2AState *d)
 {
@@ -124,16 +151,38 @@ static bool pipeline_cache_entry_compare(Lru *lru, LruNode *node,
 static void init_pipeline_cache(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+#ifdef CONFIG_UWP
+    g_autofree char *cache_path = qemu_host_dup_pipeline_cache_file();
+    g_autofree char *cache_data = NULL;
+    gsize cache_size = 0;
+
+    if (cache_path &&
+        !g_file_get_contents(cache_path, &cache_data, &cache_size, NULL)) {
+        cache_size = 0;
+    }
+    uwp_pipeline_cache_updates = 0;
+    uwp_pipeline_rejection_reported = false;
+#endif
 
     VkPipelineCacheCreateInfo cache_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
         .flags = 0,
+#ifdef CONFIG_UWP
+        .initialDataSize = cache_size,
+        .pInitialData = cache_data,
+#else
         .initialDataSize = 0,
         .pInitialData = NULL,
+#endif
         .pNext = NULL,
     };
     VK_CHECK(vkCreatePipelineCache(r->device, &cache_info, NULL,
                                    &r->vk_pipeline_cache));
+#ifdef CONFIG_UWP
+    qemu_host_emit_log(QEMU_HOST_LOG_DEBUG,
+                       cache_size ? "Vulkan/DZN: pipeline cache loaded" :
+                                    "Vulkan/DZN: starting an empty pipeline cache");
+#endif
 
     const size_t pipeline_cache_size = 2048;
     lru_init(&r->pipeline_cache);
@@ -157,6 +206,9 @@ static void finalize_pipeline_cache(PGRAPHState *pg)
     g_free(r->pipeline_cache_entries);
     r->pipeline_cache_entries = NULL;
 
+#ifdef CONFIG_UWP
+    save_uwp_pipeline_cache(r);
+#endif
     vkDestroyPipelineCache(r->device, r->vk_pipeline_cache, NULL);
 }
 
@@ -1005,8 +1057,86 @@ static void create_pipeline(PGRAPHState *pg)
         .basePipelineHandle = VK_NULL_HANDLE,
     };
     VkPipeline pipeline;
-    VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
-                                       &pipeline_create_info, NULL, &pipeline));
+    VkResult pipeline_result = vkCreateGraphicsPipelines(
+        r->device, r->vk_pipeline_cache, 1, &pipeline_create_info, NULL,
+        &pipeline);
+#ifdef CONFIG_UWP
+    if (pipeline_result != VK_SUCCESS) {
+        char message[512];
+        snprintf(message, sizeof(message),
+                 "Vulkan/DZN pipeline rejected: result=%d stages=%d "
+                 "topology=%d polygon=%d cull=0x%x color=%d depth=%d "
+                 "blend=%d vertex-bindings=%u vertex-attributes=%u",
+                 pipeline_result, num_active_shader_stages,
+                 input_assembly.topology, rasterizer.polygonMode,
+                 rasterizer.cullMode, r->color_binding ?
+                     r->color_binding->host_fmt.vk_format : VK_FORMAT_UNDEFINED,
+                 r->zeta_binding ? r->zeta_binding->host_fmt.vk_format :
+                                   VK_FORMAT_UNDEFINED,
+                 color_blend_attachment.blendEnable,
+                 vertex_input.vertexBindingDescriptionCount,
+                 vertex_input.vertexAttributeDescriptionCount);
+        if (!uwp_pipeline_rejection_reported) {
+            qemu_host_emit_log(QEMU_HOST_LOG_WARNING, message);
+            qemu_host_emit_log(
+                QEMU_HOST_LOG_WARNING,
+                "Vulkan/DZN: further equivalent pipeline fallback messages "
+                "will be suppressed");
+            uwp_pipeline_rejection_reported = true;
+        }
+
+        /* Some retail D3D12 implementations reject otherwise valid optional
+         * rasterization combinations. Retry without optional raster state;
+         * shader stages, render-pass formats and vertex interpretation remain
+         * unchanged. */
+        rasterizer.depthClampEnable = VK_FALSE;
+        rasterizer.cullMode = VK_CULL_MODE_NONE;
+        if (rasterizer.polygonMode != VK_POLYGON_MODE_FILL) {
+            rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        }
+        pipeline_result = vkCreateGraphicsPipelines(
+            r->device, VK_NULL_HANDLE, 1, &pipeline_create_info, NULL,
+            &pipeline);
+
+        /* D3D12 natively supports filled triangle lists. The NV2A geometry
+         * shader is used for legacy GL behavior, but is not required to
+         * assemble this topology. Some retail D3D12 runtimes reject the
+         * generated three-stage signature. Link VS directly to FS for this
+         * native case, while retaining GS for legacy primitives and point
+         * expansion. SPIR-V locations keep the VS/FS interface compatible. */
+        bool native_triangle_topology =
+            input_assembly.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ||
+            input_assembly.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP ||
+            input_assembly.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+        if (pipeline_result != VK_SUCCESS && native_triangle_topology &&
+            rasterizer.polygonMode == VK_POLYGON_MODE_FILL &&
+            num_active_shader_stages == 3 &&
+            shader_stages[1].stage == VK_SHADER_STAGE_GEOMETRY_BIT) {
+            VkPipelineShaderStageCreateInfo fallback_stages[2] = {
+                shader_stages[0], shader_stages[2]
+            };
+            pipeline_create_info.stageCount = ARRAY_SIZE(fallback_stages);
+            pipeline_create_info.pStages = fallback_stages;
+            pipeline_result = vkCreateGraphicsPipelines(
+                r->device, VK_NULL_HANDLE, 1, &pipeline_create_info, NULL,
+                &pipeline);
+        }
+    }
+#endif
+    if (pipeline_result != VK_SUCCESS) {
+        QEMU_HOST_VK_CHECK_LOG("vkCreateGraphicsPipelines(NV2A draw)",
+                               pipeline_result, __FILE__, __LINE__);
+    }
+    assert(pipeline_result == VK_SUCCESS && "vk pipeline creation failed");
+
+#ifdef CONFIG_UWP
+    /* Xbox applications are frequently suspended or terminated without the
+     * renderer finalizer running. Persist while running, amortized across a
+     * small batch, so the next launch can reuse compiled DXIL/PSOs. */
+    if (++uwp_pipeline_cache_updates % 8 == 0) {
+        save_uwp_pipeline_cache(r);
+    }
+#endif
 
     snode->pipeline = pipeline;
     snode->layout = layout;

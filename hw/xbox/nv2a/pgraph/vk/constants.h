@@ -387,6 +387,32 @@ static const SurfaceFormatInfo kelvin_surface_color_format_vk_map[] = {
     },
 };
 
+#ifdef CONFIG_UWP
+/* D3D12 cannot use every packed Xbox color format as a render target.  Keep
+ * the Xbox representation in VRAM and use a universally renderable BGRA8
+ * image inside DZN; surface.c converts at the upload/download boundary. */
+static const SurfaceFormatInfo kelvin_surface_color_format_uwp_vk_map[] = {
+    [NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5] =
+        { 4, VK_FORMAT_B8G8R8A8_UNORM,
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT },
+    [NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5] =
+        { 4, VK_FORMAT_B8G8R8A8_UNORM,
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT },
+    [NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8] =
+        { 4, VK_FORMAT_B8G8R8A8_UNORM,
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT },
+    [NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8] =
+        { 4, VK_FORMAT_B8G8R8A8_UNORM,
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT },
+    [NV097_SET_SURFACE_FORMAT_COLOR_LE_B8] =
+        { 4, VK_FORMAT_B8G8R8A8_UNORM,
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT },
+    [NV097_SET_SURFACE_FORMAT_COLOR_LE_G8B8] =
+        { 4, VK_FORMAT_B8G8R8A8_UNORM,
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT },
+};
+#endif
+
 static const BasicSurfaceFormatInfo kelvin_surface_zeta_format_map[] = {
     [NV097_SET_SURFACE_FORMAT_ZETA_Z16] = { 2 },
     [NV097_SET_SURFACE_FORMAT_ZETA_Z24S8] = { 4 },
@@ -400,6 +426,17 @@ static const SurfaceFormatInfo zeta_d16 = {
     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
     VK_IMAGE_ASPECT_DEPTH_BIT,
 };
+
+#ifdef CONFIG_UWP
+/* DZN on retail Xbox rejects D16 images when sampled and used as a depth
+ * attachment. Store Z16 as D32 internally and convert at the VRAM boundary. */
+static const SurfaceFormatInfo zeta_d32_sfloat = {
+    4,
+    VK_FORMAT_D32_SFLOAT,
+    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+    VK_IMAGE_ASPECT_DEPTH_BIT,
+};
+#endif
 
 static const SurfaceFormatInfo zeta_d32_sfloat_s8_uint = {
     8,

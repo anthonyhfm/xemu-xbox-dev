@@ -201,6 +201,16 @@ dzn_image_create(struct dzn_device *device,
       image->valid_access |= D3D12_BARRIER_ACCESS_RESOLVE_DEST |
          D3D12_BARRIER_ACCESS_SHADER_RESOURCE |
          (pCreateInfo->samples > 1 ? D3D12_BARRIER_ACCESS_RESOLVE_SOURCE : 0);
+
+      /*
+       * A D3D12 depth/stencil resource must use a typeless resource format
+       * when its typed DSV/SRV representations are selected by image views.
+       * dzn_image_get_dxgi_format() deliberately returns the non-DSV typed
+       * representation above, which is not valid together with
+       * D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL at resource creation time.
+       */
+      if (usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+         image->desc.Format = dzn_get_typeless_dxgi_format(image->desc.Format);
    }
 
    if ((image->vk.create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&

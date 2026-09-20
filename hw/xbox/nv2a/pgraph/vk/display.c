@@ -18,6 +18,7 @@
  */
 
 #include "renderer.h"
+#include "ui/xemu-settings.h"
 #include <math.h>
 
 static uint8_t *convert_texture_data__CR8YB8CB8YA8(uint8_t *data_out,
@@ -578,10 +579,10 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
         destroy_current_display_image(pg);
     }
 
-    const GLint gl_internal_format = GL_RGBA8;
     bool use_optimal_tiling = true;
 
 #if HAVE_EXTERNAL_MEMORY
+    const GLint gl_internal_format = GL_RGBA8;
     GLint num_tiling_types;
     glGetInternalformativ(GL_TEXTURE_2D, gl_internal_format,
                           GL_NUM_TILING_TYPES_EXT, 1, &num_tiling_types);
@@ -612,11 +613,14 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
         .format = VK_FORMAT_R8G8B8A8_UNORM,
         .tiling = use_optimal_tiling ? VK_IMAGE_TILING_OPTIMAL : VK_IMAGE_TILING_LINEAR,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
 
+#if HAVE_EXTERNAL_MEMORY
     VkExternalMemoryImageCreateInfo external_memory_image_create_info = {
         .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
 #ifdef WIN32
@@ -626,6 +630,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
 #endif
     };
     image_create_info.pNext = &external_memory_image_create_info;
+#endif
 
     VK_CHECK(vkCreateImage(r->device, &image_create_info, NULL, &d->image));
 
@@ -641,6 +646,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
     };
 
+#if HAVE_EXTERNAL_MEMORY
     VkExportMemoryAllocateInfo export_memory_alloc_info = {
         .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
         .handleTypes =
@@ -652,6 +658,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
             ,
     };
     alloc_info.pNext = &export_memory_alloc_info;
+#endif
 
     VK_CHECK(vkAllocateMemory(r->device, &alloc_info, NULL, &d->memory));
     VK_CHECK(vkBindImageMemory(r->device, d->image, d->memory, 0));
@@ -990,7 +997,7 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
     pgraph_vk_transition_image_layout(pg, cmd, disp->image,
-                                      VK_FORMAT_R8G8B8_UNORM,
+                                      VK_FORMAT_R8G8B8A8_UNORM,
                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
@@ -1032,6 +1039,286 @@ static void destroy_surface_sampler(PGRAPHState *pg)
     r->display.sampler = VK_NULL_HANDLE;
 }
 
+#ifdef CONFIG_UWP
+static void destroy_uwp_swapchain(PGRAPHState *pg, bool destroy_surface)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *d = &r->display;
+
+    if (r->device != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(r->device);
+    }
+    if (d->acquire_fence != VK_NULL_HANDLE) {
+        vkDestroyFence(r->device, d->acquire_fence, NULL);
+        d->acquire_fence = VK_NULL_HANDLE;
+    }
+    g_free(d->swapchain_image_initialized);
+    d->swapchain_image_initialized = NULL;
+    g_free(d->swapchain_images);
+    d->swapchain_images = NULL;
+    d->swapchain_image_count = 0;
+    if (d->swapchain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(r->device, d->swapchain, NULL);
+        d->swapchain = VK_NULL_HANDLE;
+    }
+    if (destroy_surface && d->surface != VK_NULL_HANDLE) {
+        vkDestroySurfaceKHR(r->instance, d->surface, NULL);
+        d->surface = VK_NULL_HANDLE;
+    }
+}
+
+static bool create_uwp_swapchain(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *d = &r->display;
+    VkResult result;
+
+    if (d->surface == VK_NULL_HANDLE) {
+        VkWin32SurfaceCreateInfoKHR surface_info = {
+            .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+            .hinstance = NULL,
+            .hwnd = NULL,
+        };
+        result = vkCreateWin32SurfaceKHR(r->instance, &surface_info, NULL,
+                                         &d->surface);
+        if (result != VK_SUCCESS) {
+            fprintf(stderr, "DZN UWP: vkCreateWin32SurfaceKHR failed (%d)\n",
+                    result);
+            return false;
+        }
+    }
+
+    VkSurfaceCapabilitiesKHR caps;
+    result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(r->physical_device,
+                                                        d->surface, &caps);
+    if (result != VK_SUCCESS || caps.currentExtent.width == 0 ||
+        caps.currentExtent.height == 0) {
+        fprintf(stderr, "DZN UWP: invalid surface capabilities (%d, %ux%u)\n",
+                result, caps.currentExtent.width, caps.currentExtent.height);
+        return false;
+    }
+
+    uint32_t format_count = 0;
+    VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(r->physical_device,
+                                                   d->surface, &format_count,
+                                                   NULL));
+    if (!format_count) {
+        return false;
+    }
+    g_autofree VkSurfaceFormatKHR *formats =
+        g_new(VkSurfaceFormatKHR, format_count);
+    VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(r->physical_device,
+                                                   d->surface, &format_count,
+                                                   formats));
+    VkSurfaceFormatKHR selected = formats[0];
+    for (uint32_t i = 0; i < format_count; i++) {
+        if (formats[i].format == VK_FORMAT_B8G8R8A8_UNORM &&
+            formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            selected = formats[i];
+            break;
+        }
+    }
+
+    uint32_t image_count = MAX(2u, caps.minImageCount);
+    if (caps.maxImageCount && image_count > caps.maxImageCount) {
+        image_count = caps.maxImageCount;
+    }
+    VkSwapchainCreateInfoKHR create_info = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .surface = d->surface,
+        .minImageCount = image_count,
+        .imageFormat = selected.format,
+        .imageColorSpace = selected.colorSpace,
+        .imageExtent = caps.currentExtent,
+        .imageArrayLayers = 1,
+        .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .preTransform = caps.currentTransform,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = g_config.display.window.vsync ?
+                           VK_PRESENT_MODE_FIFO_KHR :
+                           VK_PRESENT_MODE_IMMEDIATE_KHR,
+        .clipped = VK_TRUE,
+        .oldSwapchain = d->swapchain,
+    };
+
+    VkSwapchainKHR old_swapchain = d->swapchain;
+    d->swapchain = VK_NULL_HANDLE;
+    result = vkCreateSwapchainKHR(r->device, &create_info, NULL,
+                                  &d->swapchain);
+    if (result != VK_SUCCESS &&
+        create_info.presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+        create_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        result = vkCreateSwapchainKHR(r->device, &create_info, NULL,
+                                      &d->swapchain);
+    }
+    if (result != VK_SUCCESS) {
+        d->swapchain = old_swapchain;
+        fprintf(stderr, "DZN UWP: vkCreateSwapchainKHR failed (%d)\n", result);
+        return false;
+    }
+    if (old_swapchain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(r->device, old_swapchain, NULL);
+    }
+
+    g_free(d->swapchain_images);
+    g_free(d->swapchain_image_initialized);
+    VK_CHECK(vkGetSwapchainImagesKHR(r->device, d->swapchain,
+                                     &d->swapchain_image_count, NULL));
+    d->swapchain_images = g_new(VkImage, d->swapchain_image_count);
+    d->swapchain_image_initialized =
+        g_new0(bool, d->swapchain_image_count);
+    VK_CHECK(vkGetSwapchainImagesKHR(r->device, d->swapchain,
+                                     &d->swapchain_image_count,
+                                     d->swapchain_images));
+    d->swapchain_format = selected.format;
+    d->swapchain_extent = caps.currentExtent;
+
+    if (d->acquire_fence == VK_NULL_HANDLE) {
+        VkFenceCreateInfo fence_info = {
+            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        };
+        VK_CHECK(vkCreateFence(r->device, &fence_info, NULL,
+                               &d->acquire_fence));
+    }
+    fprintf(stderr, "DZN UWP: native swapchain ready (%ux%u, %u images)\n",
+            d->swapchain_extent.width, d->swapchain_extent.height,
+            d->swapchain_image_count);
+    return true;
+}
+
+static bool present_uwp_swapchain(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *d = &r->display;
+    uint32_t image_index;
+
+    if (d->swapchain == VK_NULL_HANDLE && !create_uwp_swapchain(pg)) {
+        return false;
+    }
+
+    VkSurfaceCapabilitiesKHR caps;
+    VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+        r->physical_device, d->surface, &caps);
+    if (result != VK_SUCCESS) {
+        fprintf(stderr, "DZN UWP: failed to refresh surface capabilities (%d)\n",
+                result);
+        return false;
+    }
+    if (caps.currentExtent.width != d->swapchain_extent.width ||
+        caps.currentExtent.height != d->swapchain_extent.height) {
+        destroy_uwp_swapchain(pg, false);
+        if (!create_uwp_swapchain(pg)) {
+            return false;
+        }
+    }
+
+    result = vkAcquireNextImageKHR(r->device, d->swapchain, UINT64_MAX,
+                                   VK_NULL_HANDLE, d->acquire_fence,
+                                   &image_index);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        destroy_uwp_swapchain(pg, false);
+        return create_uwp_swapchain(pg);
+    }
+    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+        fprintf(stderr, "DZN UWP: vkAcquireNextImageKHR failed (%d)\n", result);
+        return false;
+    }
+    VK_CHECK(vkWaitForFences(r->device, 1, &d->acquire_fence, VK_TRUE,
+                             UINT64_MAX));
+    VK_CHECK(vkResetFences(r->device, 1, &d->acquire_fence));
+
+    VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
+    pgraph_vk_transition_image_layout(pg, cmd, d->image,
+                                      VK_FORMAT_R8G8B8A8_UNORM,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    pgraph_vk_transition_image_layout(
+        pg, cmd, d->swapchain_images[image_index], d->swapchain_format,
+        d->swapchain_image_initialized[image_index] ?
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    VkClearColorValue black = { .float32 = { 0, 0, 0, 1 } };
+    VkImageSubresourceRange range = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .levelCount = 1,
+        .layerCount = 1,
+    };
+    vkCmdClearColorImage(cmd, d->swapchain_images[image_index],
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1,
+                         &range);
+
+    uint32_t dst_width = d->swapchain_extent.width;
+    uint32_t dst_height = d->swapchain_extent.height;
+    double source_aspect = (double)d->width / (double)d->height;
+    double target_aspect = (double)dst_width / (double)dst_height;
+    int32_t left = 0;
+    int32_t top = 0;
+    int32_t right = dst_width;
+    int32_t bottom = dst_height;
+    if (target_aspect > source_aspect) {
+        uint32_t fitted = (uint32_t)(dst_height * source_aspect + 0.5);
+        left = (dst_width - fitted) / 2;
+        right = left + fitted;
+    } else if (target_aspect < source_aspect) {
+        uint32_t fitted = (uint32_t)(dst_width / source_aspect + 0.5);
+        top = (dst_height - fitted) / 2;
+        bottom = top + fitted;
+    }
+    VkImageBlit blit = {
+        .srcSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .layerCount = 1,
+        },
+        /* Vulkan's framebuffer origin is opposite to the XAML swapchain
+         * presentation origin used by DZN. Flip only the final UWP copy so
+         * the renderer's internal coordinates and desktop WSI stay intact. */
+        .srcOffsets = { { 0, d->height, 0 }, { d->width, 0, 1 } },
+        .dstSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .layerCount = 1,
+        },
+        .dstOffsets = { { left, top, 0 }, { right, bottom, 1 } },
+    };
+    vkCmdBlitImage(cmd, d->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   d->swapchain_images[image_index],
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                   g_config.display.filtering == CONFIG_DISPLAY_FILTERING_LINEAR ?
+                       VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+
+    pgraph_vk_transition_image_layout(pg, cmd, d->image,
+                                      VK_FORMAT_R8G8B8A8_UNORM,
+                                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    pgraph_vk_transition_image_layout(pg, cmd,
+                                      d->swapchain_images[image_index],
+                                      d->swapchain_format,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    pgraph_vk_end_single_time_commands(pg, cmd);
+    d->swapchain_image_initialized[image_index] = true;
+
+    VkPresentInfoKHR present_info = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .swapchainCount = 1,
+        .pSwapchains = &d->swapchain,
+        .pImageIndices = &image_index,
+    };
+    result = vkQueuePresentKHR(r->queue, &present_info);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+        destroy_uwp_swapchain(pg, false);
+        return create_uwp_swapchain(pg);
+    }
+    if (result != VK_SUCCESS) {
+        fprintf(stderr, "DZN UWP: vkQueuePresentKHR failed (%d)\n", result);
+        return false;
+    }
+    return true;
+}
+#endif
+
 void pgraph_vk_init_display(PGRAPHState *pg)
 {
     create_descriptor_pool(pg);
@@ -1040,11 +1327,18 @@ void pgraph_vk_init_display(PGRAPHState *pg)
     create_render_pass(pg);
     create_display_pipeline(pg);
     create_surface_sampler(pg);
+#ifdef CONFIG_UWP
+    create_uwp_swapchain(pg);
+#endif
 }
 
 void pgraph_vk_finalize_display(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+#ifdef CONFIG_UWP
+    destroy_uwp_swapchain(pg, true);
+#endif
 
     destroy_pvideo_image(pg);
 
@@ -1090,4 +1384,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     }
 
     render_display(pg, surface);
+#ifdef CONFIG_UWP
+    present_uwp_swapchain(pg);
+#endif
 }

@@ -839,6 +839,13 @@ static void gl_render_frame(struct xemu_console *scon)
         return;
     }
 
+#ifdef CONFIG_UWP
+    if (nv2a_present_frame()) {
+        qatomic_set(&rendering, false);
+        return;
+    }
+#endif
+
     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
 
     bool flip_required = false;

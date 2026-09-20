@@ -921,11 +921,10 @@ wsi_win32_surface_create_swapchain_dxgi(
        FAILED(swapchain1->QueryInterface(&chain->dxgi)))
       return VK_ERROR_INITIALIZATION_FAILED;
 #else
-   if (FAILED(factory->CreateSwapChainForCoreWindow(queue, static_cast<IUnknown*>(uwp_get_window_reference()), &desc, nullptr, &swapchain1)) ||
+   if (FAILED(factory->CreateSwapChainForComposition(queue, &desc, NULL,
+                                                      &swapchain1)) ||
        FAILED(swapchain1->QueryInterface(&chain->dxgi)))
       return VK_ERROR_INITIALIZATION_FAILED;
-
-
 #endif
 
    swapchain1->Release();
@@ -943,6 +942,12 @@ wsi_win32_surface_create_swapchain_dxgi(
       surface->current_swapchain = chain;
    }
 #else
+   HRESULT attach_result = mesa_uwp_attach_swapchain(chain->dxgi);
+   if (FAILED(attach_result)) {
+      chain->dxgi->Release();
+      chain->dxgi = nullptr;
+      return VK_ERROR_INITIALIZATION_FAILED;
+   }
    surface->current_swapchain = chain;
 #endif
    return VK_SUCCESS;
@@ -1064,6 +1069,12 @@ fail:
 static IDXGIFactory4 *
 dxgi_get_factory(bool debug)
 {
+#ifdef _XBOX_UWP
+   UINT flags = 0;
+   IDXGIFactory4 *factory;
+   HRESULT hr = CreateDXGIFactory2(flags, IID_PPV_ARGS(&factory));
+   return SUCCEEDED(hr) ? factory : NULL;
+#else
    HMODULE dxgi_mod = LoadLibraryA("DXGI.DLL");
    if (!dxgi_mod) {
       return NULL;
@@ -1088,6 +1099,7 @@ dxgi_get_factory(bool debug)
    }
 
    return factory;
+#endif
 }
 
 #ifndef _XBOX_UWP

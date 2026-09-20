@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/qemu-host.h"
 #include "ui/xemu-settings.h"
 #include "renderer.h"
 #include "xemu-version.h"
@@ -27,12 +28,41 @@
 
 static bool enable_validation = false;
 
+#ifdef CONFIG_UWP
+static HMODULE dzn_module;
+
+static bool initialize_uwp_dzn(Error **errp)
+{
+    if (!dzn_module) {
+        dzn_module = LoadPackagedLibrary(L"vulkan_dzn.dll", 0);
+    }
+    if (!dzn_module) {
+        error_setg(errp, "Failed to load packaged vulkan_dzn.dll (%lu)",
+                   GetLastError());
+        return false;
+    }
+
+    PFN_vkGetInstanceProcAddr get_instance_proc_addr =
+        (PFN_vkGetInstanceProcAddr)GetProcAddress(dzn_module,
+                                                  "vk_icdGetInstanceProcAddr");
+    if (!get_instance_proc_addr) {
+        error_setg(errp, "vulkan_dzn.dll does not export vk_icdGetInstanceProcAddr");
+        return false;
+    }
+
+    volkInitializeCustom(get_instance_proc_addr);
+    return true;
+}
+#endif
+
 static char const *const validation_layers[] = {
     "VK_LAYER_KHRONOS_validation",
 };
 
 static char const *const required_device_extensions[] = {
-#ifdef WIN32
+#ifdef CONFIG_UWP
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+#elif defined(WIN32)
     VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
     VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
 #else
@@ -142,6 +172,19 @@ add_optional_instance_extension_names(PGRAPHState *pg,
         g_config.display.vulkan.validation_layers &&
         add_extension_if_available(available_extensions, enabled_extension_names,
                                    VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+#ifdef CONFIG_UWP
+    const char *surface_extension = VK_KHR_SURFACE_EXTENSION_NAME;
+    const char *win32_surface_extension = VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
+    if (!add_extension_if_available(available_extensions,
+                                    enabled_extension_names,
+                                    surface_extension) ||
+        !add_extension_if_available(available_extensions,
+                                    enabled_extension_names,
+                                    win32_surface_extension)) {
+        qemu_host_emit_log(QEMU_HOST_LOG_ERROR,
+                           "DZN does not expose the required UWP surface extensions");
+    }
+#endif
 }
 
 static bool create_instance(PGRAPHState *pg, Error **errp)
@@ -149,7 +192,14 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
     PGRAPHVkState *r = pg->vk_renderer_state;
     VkResult result;
 
+#ifdef CONFIG_UWP
+    if (!initialize_uwp_dzn(errp)) {
+        return false;
+    }
+    result = VK_SUCCESS;
+#else
     result = volkInitialize();
+#endif
     if (result != VK_SUCCESS) {
         error_setg(errp, "volkInitialize failed");
         return false;
@@ -181,6 +231,17 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
 
     g_autoptr(StringArray) enabled_extension_names =
         g_array_new(FALSE, FALSE, sizeof(char *));
+
+#ifdef CONFIG_UWP
+    if (!is_extension_available(available_extensions,
+                                VK_KHR_SURFACE_EXTENSION_NAME) ||
+        !is_extension_available(available_extensions,
+                                VK_KHR_WIN32_SURFACE_EXTENSION_NAME)) {
+        error_setg(errp,
+                   "DZN does not expose the Vulkan surface extensions required by UWP");
+        return false;
+    }
+#endif
 
     add_optional_instance_extension_names(pg, available_extensions,
                                           enabled_extension_names);
@@ -506,6 +567,13 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
             fprintf(stderr,
                     "Error: Device does not support required feature %s\n",
                     desired_features[i].name);
+#ifdef CONFIG_UWP
+            char message[160];
+            snprintf(message, sizeof(message),
+                     "Vulkan device does not support required feature: %s",
+                     desired_features[i].name);
+            qemu_host_emit_log(QEMU_HOST_LOG_ERROR, message);
+#endif
             all_required_features_available = false;
         }
         *desired_features[i].enabled = desired_features[i].available;
