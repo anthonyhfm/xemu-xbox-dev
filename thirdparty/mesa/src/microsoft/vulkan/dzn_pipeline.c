@@ -40,6 +40,10 @@
 
 #include "util/u_debug.h"
 
+#ifdef _XBOX_UWP
+static bool dzn_uwp_pso_diagnostic_reported;
+#endif
+
 #define d3d12_pipeline_state_stream_new_desc(__stream, __maxstreamsz, __id, __type, __desc) \
    __type *__desc; \
    do { \
@@ -408,6 +412,14 @@ enum dxil_shader_model
    return ((pdev->shader_model & 0xf0) << 12) | (pdev->shader_model & 0xf);
 }
 
+static enum dxil_shader_model
+dzn_pipeline_get_shader_model(const struct dzn_physical_device *pdev,
+                              mesa_shader_stage stage)
+{
+   (void)stage;
+   return dzn_get_shader_model(pdev);
+}
+
 static VkResult
 dzn_pipeline_compile_shader(struct dzn_device *device,
                             nir_shader *nir,
@@ -425,7 +437,8 @@ dzn_pipeline_compile_shader(struct dzn_device *device,
          (device->vk.enabled_extensions.KHR_shader_float16_int8 ||
           device->vk.enabled_features.shaderFloat16 ||
           device->vk.enabled_features.shaderInt16),
-      .shader_model_max = dzn_get_shader_model(pdev),
+      .shader_model_max = dzn_pipeline_get_shader_model(pdev,
+                                                        nir->info.stage),
       .input_clip_size = input_clip_size,
       .advanced_texture_ops = pdev->options14.AdvancedTextureOpsSupported,
 #ifdef _WIN32
@@ -1019,6 +1032,10 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
          _mesa_blake3_update(&dxil_hash_ctx, stages[stage].link_hashes[0], sizeof(stages[stage].link_hashes[0]));
          _mesa_blake3_update(&dxil_hash_ctx, stages[stage].link_hashes[1], sizeof(stages[stage].link_hashes[1]));
          _mesa_blake3_update(&dxil_hash_ctx, bindings_hash, sizeof(bindings_hash));
+         enum dxil_shader_model shader_model =
+            dzn_pipeline_get_shader_model(pdev, stage);
+         _mesa_blake3_update(&dxil_hash_ctx, &shader_model,
+                             sizeof(shader_model));
          _mesa_blake3_final(&dxil_hash_ctx, stages[stage].dxil_hash);
          dxil_hashes[stage] = stages[stage].dxil_hash;
 
@@ -2061,6 +2078,86 @@ dzn_graphics_pipeline_create(struct dzn_device *device,
                                                &IID_ID3D12PipelineState,
                                                (void **)&pipeline->base.state);
       if (FAILED(hres)) {
+#ifdef _XBOX_UWP
+         if (!dzn_uwp_pso_diagnostic_reported) {
+            dzn_uwp_pso_diagnostic_reported = true;
+            debug_printf("DZN: graphics PSO rejected hr=0x%08x stages=%u "
+                         "rt=%u depth=%u stream=%zu\n",
+                         (unsigned)hres, pCreateInfo->stageCount, color_count,
+                         (unsigned)zs_fmt, stream_desc->SizeInBytes);
+            struct dzn_instance *instance = container_of(
+               device->vk.physical->instance, struct dzn_instance, vk);
+            for (unsigned stage = 0; stage < MESA_SHADER_STAGES; stage++) {
+               nir_shader *nir = pipeline->templates.shaders[stage].nir;
+               D3D12_SHADER_BYTECODE *bc =
+                  pipeline->templates.shaders[stage].bc;
+               if (!nir || !bc || !bc->pShaderBytecode)
+                  continue;
+
+               debug_printf("DZN: stage=%u dxil=%zu inputs=0x%llx "
+                            "outputs=0x%llx sysin=0x%llx\n",
+                            stage, bc->BytecodeLength,
+                            (unsigned long long)nir->info.inputs_read,
+                            (unsigned long long)nir->info.outputs_written,
+                            (unsigned long long)nir->info.system_values_read);
+               if (stage == MESA_SHADER_GEOMETRY) {
+                  debug_printf("DZN: GS input-prim=%u output-prim=%u "
+                               "vertices-in=%u vertices-out=%u invocations=%u\n",
+                               nir->info.gs.input_primitive,
+                               nir->info.gs.output_primitive,
+                               nir->info.gs.vertices_in,
+                               nir->info.gs.vertices_out,
+                               nir->info.gs.invocations);
+               }
+
+               char *disasm = dxil_disasm_module(
+                  instance->dxil_validator, (void *)bc->pShaderBytecode,
+                  bc->BytecodeLength);
+               if (disasm) {
+                  char *context = NULL;
+                  unsigned signature_lines = 0;
+                  for (char *line = strtok_s(disasm, "\r\n", &context);
+                       line; line = strtok_s(NULL, "\r\n", &context)) {
+                     if (strstr(line, "Input signature:") ||
+                         strstr(line, "Output signature:"))
+                        signature_lines = 20;
+                     if (signature_lines) {
+                        debug_printf("DZN: DXIL stage=%u %s\n", stage, line);
+                        signature_lines--;
+                     }
+                  }
+                  ralloc_free(disasm);
+               }
+            }
+
+            ID3D12InfoQueue *info_queue = NULL;
+            if (SUCCEEDED(ID3D12Device4_QueryInterface(
+                   device->dev, &IID_ID3D12InfoQueue,
+                   (void **)&info_queue))) {
+               uint64_t count =
+                  ID3D12InfoQueue_GetNumStoredMessagesAllowedByRetrievalFilter(
+                     info_queue);
+               uint64_t first = count > 8 ? count - 8 : 0;
+               for (uint64_t i = first; i < count; i++) {
+                  SIZE_T size = 0;
+                  ID3D12InfoQueue_GetMessage(info_queue, i, NULL, &size);
+                  D3D12_MESSAGE *message = malloc(size);
+                  if (message && SUCCEEDED(ID3D12InfoQueue_GetMessage(
+                         info_queue, i, message, &size))) {
+                     debug_printf("DZN: D3D12 message id=%u severity=%u: %s\n",
+                                  message->ID, message->Severity,
+                                  message->pDescription);
+                  }
+                  free(message);
+               }
+               if (!count)
+                  debug_printf("DZN: D3D12 info queue contains no messages\n");
+               ID3D12InfoQueue_Release(info_queue);
+            } else {
+               debug_printf("DZN: D3D12 info queue is unavailable\n");
+            }
+         }
+#endif
          mesa_loge("DZN: ID3D12Device4::CreatePipelineState failed "
                    "(HRESULT=0x%08x, stages=%u, render-targets=%u, "
                    "depth-format=%u)\n",

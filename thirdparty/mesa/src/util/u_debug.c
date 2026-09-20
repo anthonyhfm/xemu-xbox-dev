@@ -38,10 +38,12 @@
 #include <ctype.h> /* isalnum */
 
 #ifdef _XBOX_UWP
+#include "util/uwp_util.h"
+
 static void (*mesa_uwp_log_callback)(void *opaque, const char *message);
 static void *mesa_uwp_log_opaque;
 
-void
+MESA_UWP_EXPORT void
 mesa_uwp_set_log_callback(void (*callback)(void *, const char *), void *opaque)
 {
    mesa_uwp_log_callback = callback;

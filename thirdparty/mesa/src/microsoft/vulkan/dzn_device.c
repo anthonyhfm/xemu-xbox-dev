@@ -696,10 +696,7 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
       .pipelineStatisticsQuery = true,
       .vertexPipelineStoresAndAtomics = true,
       .fragmentStoresAndAtomics = true,
-      /* D3D12 has no programmable point-size output.  The SPIR-V to DXIL
-       * lowering expands geometry-stage points into triangle strips and
-       * removes PointSize when the output topology is not points. */
-      .shaderTessellationAndGeometryPointSize = true,
+      .shaderTessellationAndGeometryPointSize = false,
       .shaderImageGatherExtended = true,
       .shaderStorageImageExtendedFormats = pdev->options.TypedUAVLoadAdditionalFormats,
       .shaderStorageImageMultisample = false,

@@ -252,6 +252,8 @@ bool XemuHost::AttachRenderPanel(Windows::UI::Xaml::Controls::SwapChainPanel^ pa
         GetProcAddress(m_sdlModule, "SDL_SetLogOutputFunction"));
     auto setMesaLog = reinterpret_cast<SetMesaLog>(
         GetProcAddress(m_mesaModule, "mesa_uwp_set_log_callback"));
+    auto setDznLog = reinterpret_cast<SetMesaLog>(
+        GetProcAddress(m_vulkanModule, "mesa_uwp_set_log_callback"));
     if (!attachSDL || !m_attachMesa || !m_setMesaSwapChainAttach ||
         !m_attachDzn || !m_setDznSwapChainAttach ||
         !m_updateSDLPanelSize ||
@@ -274,6 +276,11 @@ bool XemuHost::AttachRenderPanel(Windows::UI::Xaml::Controls::SwapChainPanel^ pa
     }
     setSDLLog(&XemuHost::SDLLog, this);
     setMesaLog(&XemuHost::MesaLog, this);
+    if (setDznLog) {
+        setDznLog(&XemuHost::MesaLog, this);
+    } else {
+        WriteDiagnostic("[loader] Optional Mesa DZN log callback is unavailable");
+    }
     m_renderPanel = panel;
     m_setMesaSwapChainAttach(&XemuHost::AttachMesaSwapChain, this);
     m_setDznSwapChainAttach(&XemuHost::AttachMesaSwapChain, this);

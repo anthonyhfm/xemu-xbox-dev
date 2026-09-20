@@ -7,6 +7,7 @@ on:
       - '.github/workflows/build-uwp-port.yml'
       - 'UWP-Port/**'
       - 'scripts/xemu-version.sh'
+      - 'scripts/xemu-version-uwp.py'
       - 'scripts/qemu-version.sh'
       - 'configs/meson/mesa-uwp-x64.ini'
       - 'thirdparty/mesa/**'
@@ -20,6 +21,7 @@ on:
       - '.github/workflows/build-uwp-port.yml'
       - 'UWP-Port/**'
       - 'scripts/xemu-version.sh'
+      - 'scripts/xemu-version-uwp.py'
       - 'scripts/qemu-version.sh'
       - 'configs/meson/mesa-uwp-x64.ini'
       - 'thirdparty/mesa/**'
@@ -105,16 +107,25 @@ jobs:
             mingw-w64-ucrt-x86_64-xxhash
             mingw-w64-ucrt-x86_64-zstd
 
+      - name: Locate MSYS2 tools
+        shell: msys2 {0}
+        run: |
+          echo "MSYS2_USR_BIN=$(cygpath -w /usr/bin)" >> "$GITHUB_ENV"
+          echo "MSYS2_UCRT64_BIN=$(cygpath -w /ucrt64/bin)" >> "$GITHUB_ENV"
+          echo "MSYS2_UCRT64_ROOT=$(cygpath -w /ucrt64)" >> "$GITHUB_ENV"
+
       - name: Configure MSVC x64 environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Add build tools to PATH
+      - name: Select hosted Windows Python
         shell: pwsh
         run: |
-          "C:\msys64\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "C:\msys64\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $python = (Get-Command python.exe -All | Where-Object { $_.Source -notlike '*msys64*' } | Select-Object -First 1).Source
+          if (-not $python) { throw "Could not locate the GitHub-hosted Windows Python." }
+          "HOST_PYTHON=$python" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Hosted Python: $python"
 
       - name: Build SDL3_UWP
         shell: pwsh
@@ -156,6 +167,12 @@ jobs:
           echo "qemu-system-i386.dll: ${before} bytes before strip, ${after} bytes after strip"
           objdump -p build-uwp-embed/qemu-system-i386.dll | grep -q qemu_host_get_api_version
 
+      - name: Verify xemu version header generator
+        shell: pwsh
+        run: |
+          & $env:HOST_PYTHON scripts\xemu-version-uwp.py > xemu-version-test.h
+          Get-Content xemu-version-test.h
+
       - name: Test VLan coordinator and relay
         shell: pwsh
         run: |
@@ -165,12 +182,21 @@ jobs:
 
       - name: Install Mesa build Python dependencies
         shell: pwsh
-        run: python -m pip install --disable-pip-version-check meson mako packaging pyyaml
+        run: |
+          Write-Host "Using Python: $env:HOST_PYTHON"
+          & $env:HOST_PYTHON -m pip install --disable-pip-version-check meson mako packaging pyyaml
 
       - name: Configure Mesa UWP D3D12
         shell: pwsh
         run: |
-          meson setup build-uwp\mesa thirdparty\mesa `
+          $hostPythonDir = Split-Path -Parent $env:HOST_PYTHON
+          $parts = @($env:PATH -split ';' | Where-Object {
+            $_ -and ($_ -ine $env:MSYS2_USR_BIN) -and ($_ -ine $env:MSYS2_UCRT64_BIN) -and ($_ -ine $hostPythonDir)
+          })
+          $env:PATH = ((@($hostPythonDir) + $parts + @($env:MSYS2_USR_BIN)) -join ';')
+          Write-Host "Hosted Python: $env:HOST_PYTHON"
+          Write-Host "MSVC linker: $((Get-Command link.exe).Source)"
+          & $env:HOST_PYTHON -m mesonbuild.mesonmain setup build-uwp\mesa thirdparty\mesa `
             --native-file configs\meson\mesa-uwp-x64.ini `
             --buildtype release `
             --default-library static `
@@ -196,7 +222,13 @@ jobs:
       - name: Build Mesa UWP D3D12
         shell: pwsh
         run: |
-          meson compile -C build-uwp\mesa
+          $hostPythonDir = Split-Path -Parent $env:HOST_PYTHON
+          $parts = @($env:PATH -split ';' | Where-Object {
+            $_ -and ($_ -ine $env:MSYS2_USR_BIN) -and ($_ -ine $env:MSYS2_UCRT64_BIN) -and ($_ -ine $hostPythonDir)
+          })
+          $env:PATH = ((@($hostPythonDir) + $parts + @($env:MSYS2_USR_BIN)) -join ';')
+          Write-Host "MSVC linker: $((Get-Command link.exe).Source)"
+          & $env:HOST_PYTHON -m mesonbuild.mesonmain compile -C build-uwp\mesa --verbose opengl32 gallium_wgl vulkan_dzn
           $required = @(
             'build-uwp\mesa\src\gallium\targets\libgl-gdi\opengl32.dll',
             'build-uwp\mesa\src\gallium\targets\wgl\gallium_wgl.dll',

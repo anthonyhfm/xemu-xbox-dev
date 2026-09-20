@@ -1507,8 +1507,31 @@ dxil_reassign_driver_locations(nir_shader* s, nir_variable_mode modes,
 
    nir_sort_variables_with_modes(s, variable_location_cmp, modes);
 
+   /* Linked stages must derive register indices from the union of both
+    * interfaces. Compacting sparse variables independently can assign a
+    * different TEXCOORD semantic to the same Vulkan location. */
+   uint64_t own_stage_mask = (modes & nir_var_shader_in) ?
+      s->info.inputs_read : s->info.outputs_written;
+   uint64_t linked_mask = own_stage_mask | other_stage_mask;
+   uint64_t generic_mask = linked_mask &
+      ~BITFIELD64_MASK(VARYING_SLOT_VAR0);
+   unsigned generic_count = util_bitcount64(generic_mask);
+
    unsigned driver_loc = 0, driver_patch_loc = 0;
    nir_foreach_variable_with_modes(var, s, modes) {
+      if (other_stage_mask && !var->data.patch) {
+         if (var->data.location >= VARYING_SLOT_VAR0) {
+            var->data.driver_location = util_bitcount64(
+               generic_mask & BITFIELD64_MASK(var->data.location));
+         } else {
+            uint64_t system_mask = linked_mask &
+               BITFIELD64_MASK(VARYING_SLOT_VAR0);
+            var->data.driver_location = generic_count + util_bitcount64(
+               system_mask & BITFIELD64_MASK(var->data.location));
+         }
+         continue;
+      }
+
       /* Overlap patches with non-patch */
       unsigned *loc = var->data.patch ? &driver_patch_loc : &driver_loc;
       var->data.driver_location = *loc;
