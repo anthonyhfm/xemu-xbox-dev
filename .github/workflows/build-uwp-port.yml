@@ -104,6 +104,8 @@ jobs:
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-python-yaml
             mingw-w64-ucrt-x86_64-sdl3
+            mingw-w64-ucrt-x86_64-vulkan-headers
+            mingw-w64-ucrt-x86_64-vulkan-volk
             mingw-w64-ucrt-x86_64-xxhash
             mingw-w64-ucrt-x86_64-zstd
 
