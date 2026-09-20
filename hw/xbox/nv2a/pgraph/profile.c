@@ -33,7 +33,8 @@ void nv2a_profile_increment(void)
     static int64_t ts = 0;
     int64_t delta = now - ts;
     if (delta >= fps_update_interval) {
-        g_nv2a_stats.increment_fps = frame_count * 1000000 / delta;
+        qatomic_set(&g_nv2a_stats.increment_fps,
+                    frame_count * 1000000 / delta);
         ts = now;
         frame_count = 0;
     }
@@ -44,6 +45,7 @@ void nv2a_profile_flip_stall(void)
     int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
     int64_t render_time = (now-g_nv2a_stats.last_flip_time)/1000;
 
+    qatomic_set(&g_nv2a_stats.current_mspf, render_time);
     g_nv2a_stats.frame_working.mspf = render_time;
     g_nv2a_stats.frame_history[g_nv2a_stats.frame_ptr] =
         g_nv2a_stats.frame_working;
@@ -51,6 +53,16 @@ void nv2a_profile_flip_stall(void)
         (g_nv2a_stats.frame_ptr + 1) % NV2A_PROF_NUM_FRAMES;
     g_nv2a_stats.frame_count++;
     memset(&g_nv2a_stats.frame_working, 0, sizeof(g_nv2a_stats.frame_working));
+}
+
+void nv2a_profile_get_video_metrics(unsigned int *fps, unsigned int *mspf)
+{
+    if (fps) {
+        *fps = qatomic_read(&g_nv2a_stats.increment_fps);
+    }
+    if (mspf) {
+        *mspf = qatomic_read(&g_nv2a_stats.current_mspf);
+    }
 }
 
 const char *nv2a_profile_get_counter_name(unsigned int cnt)

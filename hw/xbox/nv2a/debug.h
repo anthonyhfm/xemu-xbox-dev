@@ -128,6 +128,7 @@ typedef struct NV2AStats {
     int64_t last_flip_time;
     unsigned int frame_count;
     unsigned int increment_fps;
+    unsigned int current_mspf;
     struct {
         int mspf;
         int counters[NV2A_PROF__COUNT];
@@ -145,6 +146,7 @@ const char *nv2a_profile_get_counter_name(unsigned int cnt);
 int nv2a_profile_get_counter_value(unsigned int cnt);
 void nv2a_profile_increment(void);
 void nv2a_profile_flip_stall(void);
+void nv2a_profile_get_video_metrics(unsigned int *fps, unsigned int *mspf);
 
 static inline void nv2a_profile_inc_counter(enum NV2A_PROF_COUNTERS_ENUM cnt)
 {

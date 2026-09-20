@@ -147,7 +147,8 @@ XemuHost::XemuHost()
       m_virtualJoystick(nullptr), m_uwpGamepad(nullptr),
       m_gamepadErrorLogged(false), m_lastGamepadTimestamp(0),
       m_gamepadChangeLogs(0), m_renderPanel(nullptr),
-      m_getApiVersion(nullptr), m_init(nullptr), m_start(nullptr),
+      m_getApiVersion(nullptr), m_getVideoMetrics(nullptr),
+      m_init(nullptr), m_start(nullptr),
       m_renderFrame(nullptr), m_step(nullptr), m_isHostRunning(nullptr),
       m_requestStop(nullptr), m_pause(nullptr),
       m_resume(nullptr), m_reset(nullptr), m_shutdown(nullptr), m_join(nullptr), m_cleanup(nullptr),
@@ -671,6 +672,7 @@ bool XemuHost::Load()
     WriteDiagnostic("[loader] qemu-system-i386.dll loaded");
 
     bool ok = Resolve(m_getApiVersion, "qemu_host_get_api_version") &&
+              Resolve(m_getVideoMetrics, "qemu_host_get_video_metrics") &&
               Resolve(m_init, "qemu_host_init") &&
               Resolve(m_start, "qemu_host_start") &&
               Resolve(m_renderFrame, "qemu_host_render_frame") &&
@@ -858,6 +860,22 @@ bool XemuHost::RenderFrame()
             "[display] First renderer frame failed: " + std::to_string(rc));
     }
     return rc == 0;
+}
+
+bool XemuHost::GetVideoMetrics(uint32_t& fps, uint32_t& mspf) const
+{
+    if (!m_running.load() || !m_getVideoMetrics) {
+        return false;
+    }
+
+    QemuHostVideoMetrics metrics{};
+    metrics.size = sizeof(metrics);
+    if (m_getVideoMetrics(&metrics) != 0) {
+        return false;
+    }
+    fps = metrics.fps;
+    mspf = metrics.mspf;
+    return true;
 }
 
 bool XemuHost::MountFile(const std::string& virtualPath, StorageFile^ file,

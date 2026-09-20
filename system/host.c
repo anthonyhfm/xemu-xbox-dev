@@ -8,6 +8,7 @@
 #include "qemu/main-loop.h"
 #include "qemu/qemu-host.h"
 #include "qemu/thread.h"
+#include "hw/xbox/nv2a/debug.h"
 #include "system/replay.h"
 #include "system/runstate.h"
 #include "system/runstate-action.h"
@@ -331,6 +332,16 @@ int qemu_host_set_pipeline_cache_file(const char *path)
     g_free(host_pipeline_cache_file);
     host_pipeline_cache_file = copy;
     g_mutex_unlock(&host_state_lock);
+    return 0;
+}
+
+int qemu_host_get_video_metrics(QemuHostVideoMetrics *metrics)
+{
+    if (!metrics || metrics->size < sizeof(*metrics)) {
+        return -EINVAL;
+    }
+
+    nv2a_profile_get_video_metrics(&metrics->fps, &metrics->mspf);
     return 0;
 }
 

@@ -134,8 +134,8 @@ DirectXPage::DirectXPage():
 	m_savedSystemPointerCursor(nullptr),
 	m_systemPointerHidden(false),
 	m_logRefreshFrames(0),
-	m_fpsFrames(0),
-	m_fpsSampleStart(std::chrono::steady_clock::now())
+	m_lastFps(UINT32_MAX),
+	m_lastMspf(UINT32_MAX)
 {
 	InitializeComponent();
 
@@ -234,33 +234,33 @@ void DirectXPage::OnRendering(Object^, Object^)
 		if (m_xemu->IsRunning()) {
 			HideSystemPointer();
 		}
-		UpdateFpsOverlay(m_xemu->RenderFrame());
+		m_xemu->RenderFrame();
+		UpdateFpsOverlay();
 	}
 }
 
-void DirectXPage::UpdateFpsOverlay(bool framePresented)
+void DirectXPage::UpdateFpsOverlay()
 {
 	if (!m_xemu->IsRunning()) {
 		fpsOverlay->Visibility = Windows::UI::Xaml::Visibility::Collapsed;
-		m_fpsFrames = 0;
-		m_fpsSampleStart = std::chrono::steady_clock::now();
+		m_lastFps = UINT32_MAX;
+		m_lastMspf = UINT32_MAX;
 		return;
 	}
 
 	fpsOverlay->Visibility = Windows::UI::Xaml::Visibility::Visible;
-	if (framePresented) {
-		++m_fpsFrames;
+	uint32_t fps = 0;
+	uint32_t mspf = 0;
+	if (!m_xemu->GetVideoMetrics(fps, mspf) ||
+	    (fps == m_lastFps && mspf == m_lastMspf)) {
+		return;
 	}
-	auto now = std::chrono::steady_clock::now();
-	auto elapsed = std::chrono::duration<double>(now - m_fpsSampleStart).count();
-	if (elapsed >= 1.0) {
-		wchar_t text[32];
-		double fps = m_fpsFrames / elapsed;
-		swprintf_s(text, L"%.1f FPS", fps);
-		fpsCounter->Text = ref new String(text);
-		m_fpsFrames = 0;
-		m_fpsSampleStart = now;
-	}
+
+	wchar_t text[48];
+	swprintf_s(text, L"%u FPS  %u MSPF", fps, mspf);
+	fpsCounter->Text = ref new String(text);
+	m_lastFps = fps;
+	m_lastMspf = mspf;
 }
 
 // Salva o estado atual do aplicativo para eventos de suspensão e de encerramento.
@@ -466,7 +466,7 @@ void DirectXPage::StartXemu_Click(Object^, RoutedEventArgs^)
 		errorText->Text = "VLan/VPN requires a valid coordinator and 32-character room code.";
 		return;
 	}
-	if (m_xemu->Start()) { hostStatus->Text = "RUNNING"; m_fpsFrames = 0; m_fpsSampleStart = std::chrono::steady_clock::now(); fpsCounter->Text = "0 FPS"; fpsOverlay->Visibility = Windows::UI::Xaml::Visibility::Visible; FocusEmulatorInput(); launcherPanel->Visibility = Windows::UI::Xaml::Visibility::Collapsed; HideSystemPointer(); }
+	if (m_xemu->Start()) { hostStatus->Text = "RUNNING"; m_lastFps = UINT32_MAX; m_lastMspf = UINT32_MAX; fpsCounter->Text = "0 FPS  0 MSPF"; fpsOverlay->Visibility = Windows::UI::Xaml::Visibility::Visible; FocusEmulatorInput(); launcherPanel->Visibility = Windows::UI::Xaml::Visibility::Collapsed; HideSystemPointer(); }
 	else { if (m_vlan) m_vlan->Stop(); auto e = m_xemu->LastError(); errorText->Text = ref new String(std::wstring(e.begin(), e.end()).c_str()); }
 }
 

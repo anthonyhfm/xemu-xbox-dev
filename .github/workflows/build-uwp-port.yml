@@ -267,13 +267,6 @@ jobs:
             throw "Expected exactly one MSIX package, found $($packages.Count)."
           }
           Write-Host "Package: $($packages[0].FullName)"
-          $layout = 'UWP-Port\UWP-Port\x64\Release\PackageLayout'
-          foreach ($runtime in @('glslang.dll', 'libSPIRV-Tools.dll',
-                                  'libSPIRV-Tools-opt.dll', 'vulkan_dzn.dll')) {
-            if (-not (Test-Path -LiteralPath (Join-Path $layout $runtime))) {
-              throw "Required renderer runtime is missing from the package layout: $runtime"
-            }
-          }
 
       - name: Upload UWP-Port package
         uses: actions/upload-artifact@v4

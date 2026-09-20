@@ -25,6 +25,7 @@ namespace UWP_Port
         void Reset();
         void Shutdown();
         bool RenderFrame();
+        bool GetVideoMetrics(uint32_t& fps, uint32_t& mspf) const;
         bool IsRunning() const { return m_running.load(); }
         std::string LastError() const;
         bool AttachRenderPanel(Windows::UI::Xaml::Controls::SwapChainPanel^ panel);
@@ -133,6 +134,7 @@ namespace UWP_Port
         Microsoft::WRL::ComPtr<IDXGISwapChain2> m_swapChain;
 
         decltype(&qemu_host_get_api_version) m_getApiVersion;
+        decltype(&qemu_host_get_video_metrics) m_getVideoMetrics;
         decltype(&qemu_host_init) m_init;
         decltype(&qemu_host_start) m_start;
         decltype(&qemu_host_render_frame) m_renderFrame;
