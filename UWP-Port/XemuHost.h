@@ -10,6 +10,16 @@
 #include <SDL3/SDL_joystick.h>
 #include "../include/qemu/qemu-host.h"
 
+#ifndef QEMU_HOST_HAS_VIDEO_METRICS_API
+typedef struct QemuHostVideoMetrics {
+    uint32_t size;
+    uint32_t fps;
+    uint32_t mspf;
+} QemuHostVideoMetrics;
+QEMU_HOST_EXPORT int qemu_host_get_video_metrics(
+    QemuHostVideoMetrics* metrics);
+#endif
+
 namespace UWP_Port
 {
     class XemuHost final

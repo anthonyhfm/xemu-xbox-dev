@@ -16,6 +16,14 @@
 #include "ui/input.h"
 #include "ui/xemu-settings.h"
 
+#ifndef QEMU_HOST_HAS_VIDEO_METRICS_API
+typedef struct QemuHostVideoMetrics {
+    uint32_t size;
+    uint32_t fps;
+    uint32_t mspf;
+} QemuHostVideoMetrics;
+#endif
+
 static GMutex host_state_lock;
 static GMutex host_log_lock;
 static bool host_initializing;
