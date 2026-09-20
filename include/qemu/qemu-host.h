@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define QEMU_HOST_API_VERSION_MAJOR 1U
-#define QEMU_HOST_API_VERSION_MINOR 3U
+#define QEMU_HOST_API_VERSION_MINOR 4U
 #define QEMU_HOST_API_VERSION \
     ((QEMU_HOST_API_VERSION_MAJOR << 16) | QEMU_HOST_API_VERSION_MINOR)
 
@@ -209,6 +209,10 @@ QEMU_HOST_EXPORT void qemu_host_emit_log(QemuHostLogLevel level,
                                          const char *message);
 /* The UWP host passes a UTF-8 path below ApplicationData LocalFolder. */
 QEMU_HOST_EXPORT int qemu_host_set_log_file(const char *path);
+/* Persistent Vulkan cache stored below ApplicationData LocalFolder. */
+#define QEMU_HOST_HAS_PIPELINE_CACHE_FILE_API 1
+QEMU_HOST_EXPORT int qemu_host_set_pipeline_cache_file(const char *path);
+char *qemu_host_dup_pipeline_cache_file(void);
 
 QEMU_HOST_EXPORT int qemu_host_register_storage_callbacks(
     const QemuHostStorageCallbacks *callbacks, void *opaque);

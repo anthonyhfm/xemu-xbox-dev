@@ -24,6 +24,10 @@
 #include <math.h>
 
 #ifdef CONFIG_UWP
+#ifndef QEMU_HOST_HAS_PIPELINE_CACHE_FILE_API
+char *qemu_host_dup_pipeline_cache_file(void);
+#endif
+
 static unsigned int uwp_pipeline_cache_updates;
 static bool uwp_pipeline_rejection_reported;
 
