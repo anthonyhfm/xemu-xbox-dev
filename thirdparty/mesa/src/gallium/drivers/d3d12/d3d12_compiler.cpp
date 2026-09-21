@@ -33,11 +33,14 @@
 #include "pipe/p_state.h"
 
 #include "nir.h"
+#include "nir_serialize.h"
 #include "nir/nir_draw_helpers.h"
 #include "nir/tgsi_to_nir.h"
 #include "compiler/nir/nir_builder.h"
 
 #include "util/hash_table.h"
+#include "util/blob.h"
+#include "util/disk_cache.h"
 #include "util/u_memory.h"
 #include "util/u_prim.h"
 #include "util/u_simple_shaders.h"
@@ -89,7 +92,6 @@ compile_nir(struct d3d12_context *ctx, struct d3d12_shader_selector *sel,
       shader->key.tex_wrap_states = nullptr;
 
    shader->nir = nir;
-   sel->current = shader;
 
    NIR_PASS(_, nir, nir_lower_samplers);
    NIR_PASS(_, nir, dxil_nir_split_typed_samplers);
@@ -133,11 +135,31 @@ compile_nir(struct d3d12_context *ctx, struct d3d12_shader_selector *sel,
    opts.shader_model_max = screen->max_shader_model;
    opts.advanced_texture_ops = screen->opts14.AdvancedTextureOpsSupported;
 #ifdef _WIN32
+   mtx_lock(&screen->dxil_validator_mutex);
    opts.validator_version_max = dxil_get_validator_version(ctx->dxil_validator);
+   mtx_unlock(&screen->dxil_validator_mutex);
 #endif
 
-   struct blob tmp;
-   if (!nir_to_dxil(nir, &opts, NULL, &tmp)) {
+   cache_key dxil_cache_key = {};
+   bool have_dxil_cache_key = false;
+   size_t cached_dxil_size = 0;
+   void *cached_dxil = nullptr;
+   if (screen->pso_disk_cache) {
+      struct blob key_blob;
+      blob_init(&key_blob);
+      blob_write_uint32(&key_blob, 3);
+      blob_write_bytes(&key_blob, &opts, sizeof(opts));
+      nir_serialize(&key_blob, nir, true);
+      disk_cache_compute_key(screen->pso_disk_cache, key_blob.data,
+                             key_blob.size, dxil_cache_key);
+      blob_finish(&key_blob);
+      have_dxil_cache_key = true;
+      cached_dxil = disk_cache_get(screen->pso_disk_cache, dxil_cache_key,
+                                   &cached_dxil_size);
+   }
+
+   struct blob tmp = {};
+   if (!cached_dxil && !nir_to_dxil(nir, &opts, NULL, &tmp)) {
       debug_printf("D3D12: nir_to_dxil failed\n");
       return NULL;
    }
@@ -172,7 +194,8 @@ compile_nir(struct d3d12_context *ctx, struct d3d12_shader_selector *sel,
    }
 
 #ifdef _WIN32
-   if (ctx->dxil_validator) {
+   if (!cached_dxil && ctx->dxil_validator) {
+      mtx_lock(&screen->dxil_validator_mutex);
       if (!(d3d12_debug & D3D12_DEBUG_EXPERIMENTAL)) {
          char *err;
          if (!dxil_validate_module(ctx->dxil_validator, tmp.data,
@@ -196,10 +219,20 @@ compile_nir(struct d3d12_context *ctx, struct d3d12_shader_selector *sel,
                str);
          ralloc_free(str);
       }
+      mtx_unlock(&screen->dxil_validator_mutex);
    }
 #endif
 
-   blob_finish_get_buffer(&tmp, &shader->bytecode, &shader->bytecode_length);
+   if (cached_dxil) {
+      shader->bytecode = cached_dxil;
+      shader->bytecode_length = cached_dxil_size;
+   } else {
+      blob_finish_get_buffer(&tmp, &shader->bytecode, &shader->bytecode_length);
+      if (have_dxil_cache_key) {
+         disk_cache_put(screen->pso_disk_cache, dxil_cache_key,
+                        shader->bytecode, shader->bytecode_length, nullptr);
+      }
+   }
 
    if (d3d12_debug & D3D12_DEBUG_DXIL) {
       char buf[256];
@@ -1049,7 +1082,42 @@ d3d12_fill_shader_key(struct d3d12_selection_context *sel_ctx,
    key->hash = d3d12_shader_key_hash(key);
 }
 
+struct d3d12_shader_compile_job {
+   struct d3d12_context *ctx;
+   struct d3d12_shader_selector *sel;
+   struct d3d12_shader_key key;
+   struct nir_shader *nir;
+   unsigned pstipple_binding;
+   struct d3d12_shader *result;
+   struct util_queue_fence fence;
+};
+
 static void
+compile_shader_variant_job(void *data, void *gdata, int thread_index)
+{
+   struct d3d12_shader_compile_job *job =
+      (struct d3d12_shader_compile_job *)data;
+   job->result = compile_nir(job->ctx, job->sel, &job->key, job->nir);
+}
+
+static void
+finish_shader_variant_job(struct d3d12_shader_compile_job *job)
+{
+   if (!job)
+      return;
+
+   util_queue_fence_wait(&job->fence);
+   assert(job->result);
+
+   job->result->pstipple_binding = job->pstipple_binding;
+   job->result->next_variant = job->sel->first;
+   job->sel->current = job->sel->first = job->result;
+
+   util_queue_fence_destroy(&job->fence);
+   FREE(job);
+}
+
+static struct d3d12_shader_compile_job *
 select_shader_variant(struct d3d12_selection_context *sel_ctx, d3d12_shader_selector *sel,
                      d3d12_shader_selector *prev, d3d12_shader_selector *next)
 {
@@ -1066,7 +1134,7 @@ select_shader_variant(struct d3d12_selection_context *sel_ctx, d3d12_shader_sele
 
       if (d3d12_compare_shader_keys(sel_ctx, &key, &variant->key)) {
          sel->current = variant;
-         return;
+         return nullptr;
       }
    }
 
@@ -1197,15 +1265,24 @@ select_shader_variant(struct d3d12_selection_context *sel_ctx, d3d12_shader_sele
    }
 
    nir_shader_gather_info(new_nir_variant, nir_shader_get_entrypoint(new_nir_variant));
-   d3d12_shader *new_variant = compile_nir(ctx, sel, &key, new_nir_variant);
-   assert(new_variant);
+   struct d3d12_shader_compile_job *job =
+      (struct d3d12_shader_compile_job *)CALLOC_STRUCT(d3d12_shader_compile_job);
+   if (!job) {
+      ralloc_free(new_nir_variant);
+      return nullptr;
+   }
 
-   /* keep track of polygon stipple texture binding */
-   new_variant->pstipple_binding = pstipple_binding;
+   job->ctx = ctx;
+   job->sel = sel;
+   job->key = key;
+   job->nir = new_nir_variant;
+   job->pstipple_binding = pstipple_binding;
+   util_queue_fence_init(&job->fence);
 
-   /* prepend the new shader in the selector chain and pick it */
-   new_variant->next_variant = sel->first;
-   sel->current = sel->first = new_variant;
+   struct d3d12_screen *screen = d3d12_screen(ctx->base.screen);
+   util_queue_add_job(&screen->shader_compiler_queue, job, &job->fence,
+                      compile_shader_variant_job, nullptr, 0);
+   return job;
 }
 
 static d3d12_shader_selector *
@@ -1496,6 +1573,7 @@ void
 d3d12_select_shader_variants(struct d3d12_context *ctx, const struct pipe_draw_info *dinfo)
 {
    struct d3d12_selection_context sel_ctx;
+   struct d3d12_shader_compile_job *compile_jobs[MESA_SHADER_STAGES] = {};
 
    sel_ctx.ctx = ctx;
    sel_ctx.needs_point_sprite_lowering = needs_point_sprite_lowering(ctx, dinfo);
@@ -1523,27 +1601,35 @@ d3d12_select_shader_variants(struct d3d12_context *ctx, const struct pipe_draw_i
    d3d12_shader_selector* next;
    if (stages[MESA_SHADER_VERTEX]) {
       next = get_next_shader(ctx, MESA_SHADER_VERTEX);
-      select_shader_variant(&sel_ctx, stages[MESA_SHADER_VERTEX], nullptr, next);
+      compile_jobs[MESA_SHADER_VERTEX] =
+         select_shader_variant(&sel_ctx, stages[MESA_SHADER_VERTEX], nullptr, next);
    }
    if (stages[MESA_SHADER_TESS_CTRL]) {
       prev = get_prev_shader(ctx, MESA_SHADER_TESS_CTRL);
       next = get_next_shader(ctx, MESA_SHADER_TESS_CTRL);
-      select_shader_variant(&sel_ctx, stages[MESA_SHADER_TESS_CTRL], prev, next);
+      compile_jobs[MESA_SHADER_TESS_CTRL] =
+         select_shader_variant(&sel_ctx, stages[MESA_SHADER_TESS_CTRL], prev, next);
    }
    if (stages[MESA_SHADER_TESS_EVAL]) {
       prev = get_prev_shader(ctx, MESA_SHADER_TESS_EVAL);
       next = get_next_shader(ctx, MESA_SHADER_TESS_EVAL);
-      select_shader_variant(&sel_ctx, stages[MESA_SHADER_TESS_EVAL], prev, next);
+      compile_jobs[MESA_SHADER_TESS_EVAL] =
+         select_shader_variant(&sel_ctx, stages[MESA_SHADER_TESS_EVAL], prev, next);
    }
    if (stages[MESA_SHADER_GEOMETRY]) {
       prev = get_prev_shader(ctx, MESA_SHADER_GEOMETRY);
       next = get_next_shader(ctx, MESA_SHADER_GEOMETRY);
-      select_shader_variant(&sel_ctx, stages[MESA_SHADER_GEOMETRY], prev, next);
+      compile_jobs[MESA_SHADER_GEOMETRY] =
+         select_shader_variant(&sel_ctx, stages[MESA_SHADER_GEOMETRY], prev, next);
    }
    if (stages[MESA_SHADER_FRAGMENT]) {
       prev = get_prev_shader(ctx, MESA_SHADER_FRAGMENT);
-      select_shader_variant(&sel_ctx, stages[MESA_SHADER_FRAGMENT], prev, nullptr);
+      compile_jobs[MESA_SHADER_FRAGMENT] =
+         select_shader_variant(&sel_ctx, stages[MESA_SHADER_FRAGMENT], prev, nullptr);
    }
+
+   for (unsigned stage = 0; stage < MESA_SHADER_STAGES; ++stage)
+      finish_shader_variant_job(compile_jobs[stage]);
 }
 
 static const unsigned *
@@ -1563,7 +1649,8 @@ d3d12_select_compute_shader_variants(struct d3d12_context *ctx, const struct pip
    sel_ctx.ctx = ctx;
    sel_ctx.variable_workgroup_size = workgroup_size_variable(ctx, info);
 
-   select_shader_variant(&sel_ctx, ctx->compute_state, nullptr, nullptr);
+   finish_shader_variant_job(
+      select_shader_variant(&sel_ctx, ctx->compute_state, nullptr, nullptr));
 }
 
 void

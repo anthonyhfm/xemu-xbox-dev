@@ -43,6 +43,15 @@ static void update_irq(MCPXAPUState *d)
     }
 }
 
+#ifdef CONFIG_UWP
+static void mcpx_apu_update_irq_bh(void *opaque)
+{
+    MCPXAPUState *d = MCPX_APU_DEVICE(opaque);
+
+    update_irq(d);
+}
+#endif
+
 static uint64_t mcpx_apu_read(void *opaque, hwaddr addr, unsigned int size)
 {
     MCPXAPUState *d = opaque;
@@ -278,11 +287,21 @@ static void *mcpx_apu_frame_thread(void *arg)
         }
 
         if (d->set_irq) {
+#ifdef CONFIG_UWP
+            /*
+             * Keep the real-time APU producer independent from the BQL.  The
+             * main loop applies PCI IRQ state later; scheduling a BH is
+             * thread-safe and coalesces repeated requests while rendering is
+             * busy compiling shaders or pipelines.
+             */
+            qemu_bh_schedule(d->irq_bh);
+#else
             qemu_mutex_unlock(&d->lock);
             bql_lock();
             update_irq(d);
             bql_unlock();
             qemu_mutex_lock(&d->lock);
+#endif
             d->set_irq = false;
         }
 
@@ -408,6 +427,9 @@ static void mcpx_apu_realize(PCIDevice *dev, Error **errp)
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &d->mmio);
 
     d->set_irq = false;
+#ifdef CONFIG_UWP
+    d->irq_bh = qemu_bh_new(mcpx_apu_update_irq_bh, d);
+#endif
     d->exiting = false;
     d->is_idle = false;
     d->pause_requested = true;
@@ -454,6 +476,10 @@ static void mcpx_apu_exitfn(PCIDevice *dev)
     bql_lock();
 
     qemu_thread_join(&d->apu_thread);
+#ifdef CONFIG_UWP
+    qemu_bh_delete(d->irq_bh);
+    d->irq_bh = NULL;
+#endif
     mcpx_apu_vp_finalize(d);
     mcpx_apu_monitor_finalize(d);
 }

@@ -554,7 +554,16 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
         F(occlusionQueryPrecise, true),
         F(samplerAnisotropy, false),
         F(shaderClipDistance, true),
+#ifdef CONFIG_UWP
+        /*
+         * DZN cannot expose this Vulkan feature on D3D12.  The NV2A shader
+         * generator already omits PointSize writes when it is unavailable,
+         * so requiring it here only rejects an otherwise usable device.
+         */
+        F(shaderTessellationAndGeometryPointSize, false),
+#else
         F(shaderTessellationAndGeometryPointSize, true),
+#endif
         F(wideLines, false),
         #undef F
         // clang-format on

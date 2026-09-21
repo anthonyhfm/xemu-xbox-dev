@@ -245,7 +245,7 @@ static bool vertex_cache_entry_compare(Lru *lru, LruNode *node, const void *key)
     return memcmp(&vnode->key, key, sizeof(VertexKey));
 }
 
-static const size_t element_cache_size = 50*1024;
+static const size_t element_cache_size = 50 * 1024;
 
 void pgraph_gl_init_buffers(NV2AState *d)
 {

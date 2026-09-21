@@ -199,6 +199,9 @@ bool XemuHost::AttachRenderPanel(Windows::UI::Xaml::Controls::SwapChainPanel^ pa
     }
 
     WriteDiagnostic("[display] Attaching SwapChainPanel to SDL3 and Mesa");
+    auto mesaCachePath = ApplicationData::Current->LocalFolder->Path +
+                         L"\\mesa-shader-cache";
+    _wputenv_s(L"MESA_SHADER_CACHE_DIR", mesaCachePath->Data());
     if (!m_sdlModule) {
         m_sdlModule = LoadPackagedLibrary(L"SDL3.dll", 0);
     }

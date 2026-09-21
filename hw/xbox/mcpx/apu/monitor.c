@@ -54,8 +54,19 @@ void mcpx_apu_monitor_init(MCPXAPUState *d, Error **errp)
     }
     int frame_bytes = sizeof(d->monitor.frame_buf);
     int drain = MAX(dev_drain_bytes, frame_bytes);
+#ifdef CONFIG_UWP
+    /*
+     * Xbox can temporarily preempt the application during scene changes.
+     * Keep about 2-8 device periods queued while the independent APU thread
+     * continues producing audio.  A low watermark that is too large makes the
+     * APU run in a CPU-heavy catch-up burst after a long renderer frame.
+     */
+    d->monitor.queued_bytes_low = 2 * drain;
+    d->monitor.queued_bytes_high = 8 * drain;
+#else
     d->monitor.queued_bytes_low = drain;
     d->monitor.queued_bytes_high = 3 * drain;
+#endif
 
     SDL_ResumeAudioDevice(dev);
 }

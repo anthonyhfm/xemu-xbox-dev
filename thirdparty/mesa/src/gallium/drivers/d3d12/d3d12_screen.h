@@ -31,6 +31,7 @@
 
 #include "util/list.h"
 #include "util/set.h"
+#include "util/u_queue.h"
 #ifdef HAVE_GALLIUM_D3D12_GRAPHICS
 #include "compiler/glsl_types.h"
 #include "nir.h"
@@ -40,6 +41,7 @@
 #include "d3d12_common.h"
 
 struct pb_manager;
+struct disk_cache;
 struct util_dl_library;
 
 enum resource_dimension
@@ -134,6 +136,10 @@ struct d3d12_screen {
 #ifdef HAVE_GALLIUM_D3D12_GRAPHICS
    enum dxil_shader_model max_shader_model;
    nir_shader_compiler_options nir_options;
+   struct util_queue shader_compiler_queue;
+   bool shader_compiler_queue_initialized;
+   mtx_t dxil_validator_mutex;
+   struct disk_cache *pso_disk_cache;
 #endif // HAVE_GALLIUM_D3D12_GRAPHICS
    D3D12_FEATURE_DATA_ARCHITECTURE architecture;
    D3D12_FEATURE_DATA_D3D12_OPTIONS opts;

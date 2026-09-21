@@ -393,7 +393,6 @@ static void shader_cache_init(PGRAPHState *pg)
     r->shader_cache.compare_nodes = shader_cache_entry_compare;
     r->shader_cache.post_node_evict = shader_cache_entry_post_evict;
 
-    /* FIXME: Make this configurable */
     const size_t shader_module_cache_size = 50 * 1024;
     lru_init(&r->shader_module_cache);
     r->shader_module_cache_entries =

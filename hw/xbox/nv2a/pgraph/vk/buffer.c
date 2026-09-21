@@ -60,26 +60,6 @@ void pgraph_vk_init_buffers(NV2AState *d)
         .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT
     };
 
-#ifdef CONFIG_UWP
-    /* The desktop defaults reserve several GiB up front (including ten or
-     * one hundred maximum batches). That exceeds the Xbox UWP memory budget
-     * before the first frame. UWP uses one maximum batch plus bounded ring
-     * headroom; ensure_buffer_space() already submits and recycles these
-     * buffers when necessary. Compute buffers cover a full 4096x4096
-     * depth/stencil conversion including alignment. */
-    const VkDeviceSize compute_buffer_size = 64 * MiB;
-    const VkDeviceSize index_buffer_size = 4 * MiB;
-    const VkDeviceSize inline_vertex_buffer_size = 32 * MiB;
-#else
-    const VkDeviceSize compute_buffer_size =
-        (1024 * 10) * (1024 * 10) * 8;
-    const VkDeviceSize index_buffer_size =
-        sizeof(pg->inline_elements) * 100;
-    const VkDeviceSize inline_vertex_buffer_size =
-        NV2A_VERTEXSHADER_ATTRIBUTES * NV2A_MAX_BATCH_LENGTH *
-        4 * sizeof(float) * 10;
-#endif
-
     r->storage_buffers[BUFFER_STAGING_DST] = (StorageBuffer){
         .alloc_info = host_alloc_create_info,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -96,7 +76,7 @@ void pgraph_vk_init_buffers(NV2AState *d)
         .alloc_info = device_alloc_create_info,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        .buffer_size = compute_buffer_size,
+        .buffer_size = (1024 * 10) * (1024 * 10) * 8,
     };
 
     r->storage_buffers[BUFFER_COMPUTE_SRC] = (StorageBuffer){
@@ -110,7 +90,7 @@ void pgraph_vk_init_buffers(NV2AState *d)
         .alloc_info = device_alloc_create_info,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        .buffer_size = index_buffer_size,
+        .buffer_size = sizeof(pg->inline_elements) * 100,
     };
 
     r->storage_buffers[BUFFER_INDEX_STAGING] = (StorageBuffer){
@@ -134,7 +114,8 @@ void pgraph_vk_init_buffers(NV2AState *d)
         .alloc_info = device_alloc_create_info,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        .buffer_size = inline_vertex_buffer_size,
+        .buffer_size = NV2A_VERTEXSHADER_ATTRIBUTES * NV2A_MAX_BATCH_LENGTH *
+                       4 * sizeof(float) * 10,
     };
 
     r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING] = (StorageBuffer){

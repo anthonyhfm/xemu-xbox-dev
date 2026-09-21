@@ -38,6 +38,8 @@
 #endif
 
 #include "util/hash_table.h"
+#include "util/blob.h"
+#include "util/disk_cache.h"
 #include "util/set.h"
 #include "util/u_memory.h"
 #include "util/u_prim.h"
@@ -54,6 +56,84 @@ struct d3d12_compute_pso_entry {
    struct d3d12_compute_pipeline_state key;
    ID3D12PipelineState *pso;
 };
+
+static void
+append_shader_bytecode(struct blob *key_blob, D3D12_SHADER_BYTECODE *bytecode)
+{
+   blob_write_uint64(key_blob, bytecode->BytecodeLength);
+   if (bytecode->BytecodeLength)
+      blob_write_bytes(key_blob, bytecode->pShaderBytecode,
+                       bytecode->BytecodeLength);
+   bytecode->pShaderBytecode = nullptr;
+}
+
+static bool
+compute_gfx_pso_cache_key(struct disk_cache *cache,
+                          CD3DX12_PIPELINE_STATE_STREAM3 *stream,
+                          cache_key key)
+{
+   if (!cache)
+      return false;
+
+   struct blob key_blob;
+   blob_init(&key_blob);
+   blob_write_uint32(&key_blob, 1);
+
+   D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = stream->GraphicsDescV0();
+   desc.pRootSignature = nullptr;
+   append_shader_bytecode(&key_blob, &desc.VS);
+   append_shader_bytecode(&key_blob, &desc.PS);
+   append_shader_bytecode(&key_blob, &desc.DS);
+   append_shader_bytecode(&key_blob, &desc.HS);
+   append_shader_bytecode(&key_blob, &desc.GS);
+
+   for (UINT i = 0; i < desc.InputLayout.NumElements; ++i) {
+      D3D12_INPUT_ELEMENT_DESC element = desc.InputLayout.pInputElementDescs[i];
+      blob_write_string(&key_blob, element.SemanticName);
+      element.SemanticName = nullptr;
+      blob_write_bytes(&key_blob, &element, sizeof(element));
+   }
+   desc.InputLayout.pInputElementDescs = nullptr;
+
+   for (UINT i = 0; i < desc.StreamOutput.NumEntries; ++i) {
+      D3D12_SO_DECLARATION_ENTRY entry = desc.StreamOutput.pSODeclaration[i];
+      blob_write_string(&key_blob, entry.SemanticName);
+      entry.SemanticName = nullptr;
+      blob_write_bytes(&key_blob, &entry, sizeof(entry));
+   }
+   if (desc.StreamOutput.NumStrides)
+      blob_write_bytes(&key_blob, desc.StreamOutput.pBufferStrides,
+                       desc.StreamOutput.NumStrides * sizeof(UINT));
+   desc.StreamOutput.pSODeclaration = nullptr;
+   desc.StreamOutput.pBufferStrides = nullptr;
+   desc.CachedPSO = {};
+
+   /* GraphicsDescV0 cannot represent the independent stencil masks carried
+    * by the pipeline-state stream, so include the complete descriptor too. */
+   d3d12_depth_stencil_desc_type depth_stencil =
+      (d3d12_depth_stencil_desc_type &)stream->DepthStencilState;
+   blob_write_bytes(&key_blob, &depth_stencil, sizeof(depth_stencil));
+   blob_write_bytes(&key_blob, &desc, sizeof(desc));
+
+   disk_cache_compute_key(cache, key_blob.data, key_blob.size, key);
+   blob_finish(&key_blob);
+   return true;
+}
+
+static void
+store_pso_cache_blob(struct disk_cache *cache, const cache_key key,
+                     ID3D12PipelineState *pso)
+{
+   if (!cache || !pso)
+      return;
+
+   ID3DBlob *cached_blob = nullptr;
+   if (SUCCEEDED(pso->GetCachedBlob(&cached_blob))) {
+      disk_cache_put(cache, key, cached_blob->GetBufferPointer(),
+                     cached_blob->GetBufferSize(), nullptr);
+      cached_blob->Release();
+   }
+}
 
 static const char *
 get_semantic_name(int location, int driver_location, unsigned *index)
@@ -405,50 +485,78 @@ create_gfx_pipeline_state(struct d3d12_context *ctx)
    cached_pso.pCachedBlob = NULL;
    cached_pso.CachedBlobSizeInBytes = 0;
 
+   cache_key disk_key = {};
+   bool have_disk_key = compute_gfx_pso_cache_key(screen->pso_disk_cache,
+                                                   &pso_desc, disk_key);
+   size_t disk_blob_size = 0;
+   void *disk_blob = have_disk_key ?
+      disk_cache_get(screen->pso_disk_cache, disk_key, &disk_blob_size) : nullptr;
+   bool disk_cache_hit = disk_blob != nullptr;
+   bool retried_uncached = false;
+   if (disk_blob) {
+      cached_pso.pCachedBlob = disk_blob;
+      cached_pso.CachedBlobSizeInBytes = disk_blob_size;
+   }
+
    pso_desc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
 
    ID3D12PipelineState *ret = NULL;
 
-   HRESULT hr;
-   if (screen->opts14.IndependentFrontAndBackStencilRefMaskSupported) {
-      D3D12_PIPELINE_STATE_STREAM_DESC pso_stream_desc{
-          sizeof(pso_desc),
-          &pso_desc
-      };
+   auto create_pipeline = [&]() -> HRESULT {
+      HRESULT hr;
+      if (screen->opts14.IndependentFrontAndBackStencilRefMaskSupported) {
+         D3D12_PIPELINE_STATE_STREAM_DESC pso_stream_desc{
+             sizeof(pso_desc),
+             &pso_desc
+         };
 
-      if (FAILED(hr = screen->dev->CreatePipelineState(&pso_stream_desc,
-                                                       IID_PPV_ARGS(&ret)))) {
+         hr = screen->dev->CreatePipelineState(&pso_stream_desc,
+                                                IID_PPV_ARGS(&ret));
+         if (FAILED(hr)) {
 #ifdef _XBOX_UWP
-         /* The stream entry point or one of its newer subobjects may be
-          * unavailable in a retail UWP runtime. The v0 descriptor covers
-          * states which do not require independent stencil masks. */
-         debug_printf("D3D12: CreatePipelineState failed (0x%08lX); "
-                      "trying UWP graphics descriptor fallback\n",
-                      (unsigned long)hr);
-         D3D12_GRAPHICS_PIPELINE_STATE_DESC v0desc =
-            pso_desc.GraphicsDescV0();
+            /* The stream entry point or one of its newer subobjects may be
+             * unavailable in a retail UWP runtime. The v0 descriptor covers
+             * states which do not require independent stencil masks. */
+            debug_printf("D3D12: CreatePipelineState failed (0x%08lX); "
+                         "trying UWP graphics descriptor fallback\n",
+                         (unsigned long)hr);
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC v0desc =
+               pso_desc.GraphicsDescV0();
+            hr = screen->dev->CreateGraphicsPipelineState(&v0desc,
+                                                           IID_PPV_ARGS(&ret));
+#else
+            debug_printf("D3D12: CreatePipelineState failed (0x%08lX)\n",
+                         (unsigned long)hr);
+#endif
+         }
+      } else {
+         D3D12_GRAPHICS_PIPELINE_STATE_DESC v0desc = pso_desc.GraphicsDescV0();
          hr = screen->dev->CreateGraphicsPipelineState(&v0desc,
                                                         IID_PPV_ARGS(&ret));
-         if (FAILED(hr)) {
-            debug_printf("D3D12: CreateGraphicsPipelineState fallback "
-                         "failed (0x%08lX)\n", (unsigned long)hr);
-            return NULL;
-         }
-#else
-         debug_printf("D3D12: CreatePipelineState failed (0x%08lX)\n",
-                      (unsigned long)hr);
-         return NULL;
-#endif
       }
-   } 
-   else {
-      D3D12_GRAPHICS_PIPELINE_STATE_DESC v0desc = pso_desc.GraphicsDescV0();
-      if (FAILED(hr = screen->dev->CreateGraphicsPipelineState(&v0desc,
-                                                               IID_PPV_ARGS(&ret)))) {
-         debug_printf("D3D12: CreateGraphicsPipelineState failed "
-                      "(0x%08lX)\n", (unsigned long)hr);
-         return NULL;
-      }
+      return hr;
+   };
+
+   HRESULT hr = create_pipeline();
+   if (FAILED(hr) && disk_blob) {
+      /* Driver updates can invalidate native cached PSOs. Discard the stale
+       * entry and retry exactly once with the uncached descriptor. */
+      disk_cache_remove(screen->pso_disk_cache, disk_key);
+      cached_pso = {};
+      ret = nullptr;
+      retried_uncached = true;
+      hr = create_pipeline();
+   }
+   FREE(disk_blob);
+
+   if (FAILED(hr)) {
+      debug_printf("D3D12: graphics pipeline creation failed (0x%08lX)\n",
+                   (unsigned long)hr);
+      return nullptr;
+   }
+
+   if (have_disk_key && (!disk_cache_hit || retried_uncached)) {
+      store_pso_cache_blob(screen->pso_disk_cache, disk_key, ret);
    }
 
    return ret;
@@ -466,6 +574,40 @@ equals_gfx_pipeline_state(const void *a, const void *b)
    return memcmp(a, b, sizeof(struct d3d12_gfx_pipeline_state)) == 0;
 }
 
+struct d3d12_pso_compile_job {
+   struct d3d12_context *ctx;
+   bool compute;
+   ID3D12PipelineState *result;
+   struct util_queue_fence fence;
+};
+
+static ID3D12PipelineState *create_compute_pipeline_state(
+   struct d3d12_context *ctx);
+
+static void
+compile_pso_job(void *data, void *gdata, int thread_index)
+{
+   struct d3d12_pso_compile_job *job =
+      (struct d3d12_pso_compile_job *)data;
+   job->result = job->compute ? create_compute_pipeline_state(job->ctx) :
+                               create_gfx_pipeline_state(job->ctx);
+}
+
+static ID3D12PipelineState *
+compile_pso_off_thread(struct d3d12_context *ctx, bool compute)
+{
+   struct d3d12_screen *screen = d3d12_screen(ctx->base.screen);
+   struct d3d12_pso_compile_job job = {};
+   job.ctx = ctx;
+   job.compute = compute;
+   util_queue_fence_init(&job.fence);
+   util_queue_add_job(&screen->shader_compiler_queue, &job, &job.fence,
+                      compile_pso_job, nullptr, 0);
+   util_queue_fence_wait(&job.fence);
+   util_queue_fence_destroy(&job.fence);
+   return job.result;
+}
+
 ID3D12PipelineState *
 d3d12_get_gfx_pipeline_state(struct d3d12_context *ctx)
 {
@@ -478,7 +620,7 @@ d3d12_get_gfx_pipeline_state(struct d3d12_context *ctx)
          return NULL;
 
       data->key = ctx->gfx_pipeline_state;
-      data->pso = create_gfx_pipeline_state(ctx);
+      data->pso = compile_pso_off_thread(ctx, false);
       if (!data->pso) {
          FREE(data);
          return NULL;
@@ -569,14 +711,52 @@ create_compute_pipeline_state(struct d3d12_context *ctx)
    pso_desc.CachedPSO.pCachedBlob = NULL;
    pso_desc.CachedPSO.CachedBlobSizeInBytes = 0;
 
+   cache_key disk_key = {};
+   bool have_disk_key = false;
+   size_t disk_blob_size = 0;
+   void *disk_blob = nullptr;
+   if (screen->pso_disk_cache && state->stage) {
+      struct blob key_blob;
+      blob_init(&key_blob);
+      blob_write_uint32(&key_blob, 2);
+      blob_write_bytes(&key_blob, state->stage->bytecode,
+                       state->stage->bytecode_length);
+      disk_cache_compute_key(screen->pso_disk_cache, key_blob.data,
+                             key_blob.size, disk_key);
+      blob_finish(&key_blob);
+      have_disk_key = true;
+      disk_blob = disk_cache_get(screen->pso_disk_cache, disk_key,
+                                 &disk_blob_size);
+      if (disk_blob) {
+         pso_desc.CachedPSO.pCachedBlob = disk_blob;
+         pso_desc.CachedPSO.CachedBlobSizeInBytes = disk_blob_size;
+      }
+   }
+
    pso_desc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
 
-   ID3D12PipelineState *ret;
-   if (FAILED(screen->dev->CreateComputePipelineState(&pso_desc,
-                                                      IID_PPV_ARGS(&ret)))) {
-      debug_printf("D3D12: CreateComputePipelineState failed!\n");
-      return NULL;
+   ID3D12PipelineState *ret = nullptr;
+   HRESULT hr = screen->dev->CreateComputePipelineState(&pso_desc,
+                                                         IID_PPV_ARGS(&ret));
+   bool retried_uncached = false;
+   if (FAILED(hr) && disk_blob) {
+      disk_cache_remove(screen->pso_disk_cache, disk_key);
+      pso_desc.CachedPSO = {};
+      retried_uncached = true;
+      hr = screen->dev->CreateComputePipelineState(&pso_desc,
+                                                    IID_PPV_ARGS(&ret));
    }
+   bool disk_cache_hit = disk_blob != nullptr;
+   FREE(disk_blob);
+
+   if (FAILED(hr)) {
+      debug_printf("D3D12: CreateComputePipelineState failed (0x%08lX)\n",
+                   (unsigned long)hr);
+      return nullptr;
+   }
+
+   if (have_disk_key && (!disk_cache_hit || retried_uncached))
+      store_pso_cache_blob(screen->pso_disk_cache, disk_key, ret);
 
    return ret;
 }
@@ -605,7 +785,7 @@ d3d12_get_compute_pipeline_state(struct d3d12_context *ctx)
          return NULL;
 
       data->key = ctx->compute_pipeline_state;
-      data->pso = create_compute_pipeline_state(ctx);
+      data->pso = compile_pso_off_thread(ctx, true);
       if (!data->pso) {
          FREE(data);
          return NULL;

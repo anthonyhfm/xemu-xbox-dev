@@ -44,6 +44,7 @@
 #include "util/u_debug.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
+#include "util/disk_cache.h"
 #include "util/u_screen.h"
 #include "util/u_dl.h"
 #include "util/mesa-blake3.h"
@@ -684,6 +685,11 @@ d3d12_destroy_screen(struct d3d12_screen *screen)
    mtx_destroy(&screen->descriptor_pool_mutex);
 
 #ifdef HAVE_GALLIUM_D3D12_GRAPHICS
+   if (screen->shader_compiler_queue_initialized)
+      util_queue_destroy(&screen->shader_compiler_queue);
+   mtx_destroy(&screen->dxil_validator_mutex);
+   if (screen->pso_disk_cache)
+      disk_cache_destroy(screen->pso_disk_cache);
    d3d12_varying_cache_destroy(screen);
    mtx_destroy(&screen->varying_info_mutex);
 #endif // HAVE_GALLIUM_D3D12_GRAPHICS
@@ -1412,6 +1418,18 @@ d3d12_init_screen_base(struct d3d12_screen *screen, struct sw_winsys *winsys, LU
 #ifdef HAVE_GALLIUM_D3D12_GRAPHICS
    d3d12_varying_cache_init(screen);
    mtx_init(&screen->varying_info_mutex, mtx_plain);
+   mtx_init(&screen->dxil_validator_mutex, mtx_plain);
+
+   unsigned compiler_threads = 2;
+#ifndef _XBOX_UWP
+   compiler_threads = 4;
+#endif
+   if (!util_queue_init(&screen->shader_compiler_queue, "d3d12-sh", 32,
+                        compiler_threads, UTIL_QUEUE_INIT_RESIZE_IF_FULL,
+                        screen)) {
+      return false;
+   }
+   screen->shader_compiler_queue_initialized = true;
 
    for (unsigned i = 0; i <= MESA_SHADER_COMPUTE; i++)
       screen->base.nir_options[i] = &screen->nir_options;
@@ -1891,6 +1909,16 @@ d3d12_init_screen(struct d3d12_screen *screen, IUnknown *adapter)
    _mesa_blake3_update(&blake3_ctx, &screen->revision, sizeof(screen->revision));
    _mesa_blake3_final(&blake3_ctx, blake3);
    memcpy(screen->device_uuid, blake3, PIPE_UUID_SIZE);
+
+#ifdef HAVE_GALLIUM_D3D12_GRAPHICS
+   if (!screen->pso_disk_cache) {
+      uint64_t cache_flags = screen->driver_version ^
+                             ((uint64_t)screen->vendor_id << 32) ^
+                             screen->device_id;
+      screen->pso_disk_cache = disk_cache_create("d3d12", mesa_version,
+                                                  cache_flags);
+   }
+#endif
 
    d3d12_init_shader_caps(screen);
    d3d12_init_compute_caps(screen);

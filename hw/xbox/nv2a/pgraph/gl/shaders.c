@@ -29,6 +29,8 @@
 #include "debug.h"
 #include "renderer.h"
 
+static void shader_write_to_disk(gpointer arg, gpointer user_data);
+
 static GLenum get_gl_primitive_mode(enum ShaderPolygonMode polygon_mode, enum ShaderPrimitiveMode primitive_mode)
 {
     switch (primitive_mode) {
@@ -282,6 +284,10 @@ void pgraph_gl_shader_write_cache_reload_list(PGRAPHState *pg)
     PGRAPHGLState *r = pg->gl_renderer_state;
 
     if (!g_config.perf.cache_shaders) {
+        if (r->shader_write_pool) {
+            g_thread_pool_free(r->shader_write_pool, false, true);
+            r->shader_write_pool = NULL;
+        }
         qatomic_set(&r->shader_cache_writeback_pending, false);
         qemu_event_set(&r->shader_cache_writeback_complete);
         return;
@@ -289,11 +295,18 @@ void pgraph_gl_shader_write_cache_reload_list(PGRAPHState *pg)
 
     char *shader_lru_path = shader_get_lru_cache_path();
     qemu_thread_join(&r->shader_disk_thread);
+    if (r->shader_write_pool) {
+        /* Shutdown is the only synchronization point for disk writes. */
+        g_thread_pool_free(r->shader_write_pool, false, true);
+        r->shader_write_pool = NULL;
+    }
 
     FILE *lru_list = qemu_fopen(shader_lru_path, "wb");
     g_free(shader_lru_path);
     if (!lru_list) {
         fprintf(stderr, "nv2a: Failed to open shader LRU cache for writing\n");
+        qatomic_set(&r->shader_cache_writeback_pending, false);
+        qemu_event_set(&r->shader_cache_writeback_complete);
         return;
     }
 
@@ -462,12 +475,19 @@ static void shader_load_from_disk(PGRAPHState *pg, uint64_t hash)
     g_free(cached_gl_vendor);
     g_free(cached_gl_version);
 
+retry_insert:
     qemu_mutex_lock(&r->shader_cache_lock);
+    if (r->shader_cache_compile_in_progress) {
+        qemu_mutex_unlock(&r->shader_cache_lock);
+        qemu_event_wait(&r->shader_cache_compile_complete);
+        goto retry_insert;
+    }
     LruNode *node = lru_lookup(&r->shader_cache, hash, &state);
     ShaderBinding *binding = container_of(node, ShaderBinding, node);
 
     /* If we happened to regenerate this shader already, then we may as well use the new one */
     if (binding->initialized) {
+        g_free(program_buffer);
         qemu_mutex_unlock(&r->shader_cache_lock);
         return;
     }
@@ -547,6 +567,16 @@ void pgraph_gl_init_shaders(PGRAPHState *pg)
 
     qemu_mutex_init(&r->shader_cache_lock);
     qemu_event_init(&r->shader_cache_writeback_complete, false);
+    qemu_event_init(&r->shader_cache_compile_complete, true);
+    r->shader_cache_compile_in_progress = false;
+    GError *writer_error = NULL;
+    r->shader_write_pool =
+        g_thread_pool_new(shader_write_to_disk, NULL, 1, false, &writer_error);
+    if (!r->shader_write_pool) {
+        fprintf(stderr, "nv2a: Failed to create shader cache writer: %s\n",
+                writer_error ? writer_error->message : "unknown error");
+        g_clear_error(&writer_error);
+    }
 
     if (!shader_gl_vendor) {
         shader_gl_vendor = (const char *) glGetString(GL_VENDOR);
@@ -557,8 +587,7 @@ void pgraph_gl_init_shaders(PGRAPHState *pg)
 
     shader_create_cache_folder();
 
-    /* FIXME: Make this configurable */
-    const size_t shader_cache_size = 50*1024;
+    const size_t shader_cache_size = 50 * 1024;
     lru_init(&r->shader_cache);
     r->shader_cache_entries = malloc(shader_cache_size * sizeof(ShaderBinding));
     assert(r->shader_cache_entries != NULL);
@@ -573,8 +602,7 @@ void pgraph_gl_init_shaders(PGRAPHState *pg)
     qemu_thread_create(&r->shader_disk_thread, "pgraph.renderer_state->shader_cache",
                        shader_reload_lru_from_disk, pg, QEMU_THREAD_JOINABLE);
 
-    /* FIXME: Make this configurable */
-    const size_t shader_module_cache_size = 50*1024;
+    const size_t shader_module_cache_size = 50 * 1024;
     lru_init(&r->shader_module_cache);
     r->shader_module_cache_entries =
         g_malloc_n(shader_module_cache_size, sizeof(ShaderModuleCacheEntry));
@@ -602,6 +630,8 @@ void pgraph_gl_finalize_shaders(PGRAPHState *pg)
     r->shader_module_cache_entries = NULL;
 
     qemu_mutex_destroy(&r->shader_cache_lock);
+    qemu_event_destroy(&r->shader_cache_compile_complete);
+    qemu_event_destroy(&r->shader_cache_writeback_complete);
 }
 
 typedef struct ShaderWriteTask {
@@ -612,7 +642,7 @@ typedef struct ShaderWriteTask {
     void *program;
 } ShaderWriteTask;
 
-static void *shader_write_to_disk(void *arg)
+static void shader_write_to_disk(gpointer arg, gpointer user_data)
 {
     ShaderWriteTask *task = arg;
 
@@ -675,7 +705,7 @@ static void *shader_write_to_disk(void *arg)
     g_free(task->program);
     g_free(task);
 
-    return NULL;
+    return;
 
 error:
     fprintf(stderr, "nv2a: Failed to write shader binary file to %s\n", shader_path);
@@ -683,10 +713,11 @@ error:
     g_free(shader_path);
     g_free(task->program);
     g_free(task);
-    return NULL;
+    return;
 }
 
-void pgraph_gl_shader_cache_to_disk(ShaderBinding *binding)
+static void pgraph_gl_shader_cache_to_disk(PGRAPHGLState *r,
+                                           ShaderBinding *binding)
 {
     if (binding->cached) {
         return;
@@ -717,11 +748,13 @@ void pgraph_gl_shader_cache_to_disk(ShaderBinding *binding)
     task->program_size = program_size_copied;
     binding->cached = true;
 
-    char name[24];
-    snprintf(name, sizeof(name), "scache-%llx", (unsigned long long) binding->node.hash);
-    QemuThread thread;
-    qemu_thread_create(&thread, name, shader_write_to_disk, task,
-                       QEMU_THREAD_DETACHED);
+    if (!r->shader_write_pool) {
+        g_free(task->program);
+        g_free(task);
+        binding->cached = false;
+        return;
+    }
+    g_thread_pool_push(r->shader_write_pool, task, NULL);
 }
 
 static void apply_uniform_updates(const UniformInfo *info, int *locs,
@@ -820,12 +853,25 @@ void pgraph_gl_bind_shaders(PGRAPHState *pg)
     LruNode *node = lru_lookup(&r->shader_cache, shader_state_hash, &state);
     ShaderBinding *binding = container_of(node, ShaderBinding, node);
 
-    if (!binding->initialized && !pgraph_gl_shader_load_from_memory(binding)) {
-        nv2a_profile_inc_counter(NV2A_PROF_SHADER_GEN);
-        generate_shaders(r, binding);
-        if (g_config.perf.cache_shaders) {
-            pgraph_gl_shader_cache_to_disk(binding);
+    if (!binding->initialized) {
+        /* Reserve the LRU node, then release the cache mutex before invoking
+         * the driver compiler. The disk preloader observes this reservation
+         * and cannot evict the node until it has been published. */
+        r->shader_cache_compile_in_progress = true;
+        qemu_event_reset(&r->shader_cache_compile_complete);
+        qemu_mutex_unlock(&r->shader_cache_lock);
+
+        if (!pgraph_gl_shader_load_from_memory(binding)) {
+            nv2a_profile_inc_counter(NV2A_PROF_SHADER_GEN);
+            generate_shaders(r, binding);
+            if (g_config.perf.cache_shaders) {
+                pgraph_gl_shader_cache_to_disk(r, binding);
+            }
         }
+
+        qemu_mutex_lock(&r->shader_cache_lock);
+        r->shader_cache_compile_in_progress = false;
+        qemu_event_set(&r->shader_cache_compile_complete);
     }
     assert(binding->initialized);
     r->shader_binding = binding;

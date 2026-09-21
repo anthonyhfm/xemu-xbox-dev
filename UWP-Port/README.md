@@ -28,6 +28,8 @@ creates a composition swapchain and attaches it directly to the XAML
 - Developer Mode enabled on the target PC or Xbox
 
 Only the x64 package is currently configured and tested.
+The GitHub Actions build uses
+[`rodrigoandrigo/SDL3_UWP`](https://github.com/rodrigoandrigo/SDL3_UWP).
 
 ## Expected build outputs
 
@@ -72,9 +74,14 @@ cd build-uwp-embed
 ../configure \
   --target-list=i386-softmmu \
   --enable-uwp \
+  --enable-slirp \
   --enable-sdl \
-  --enable-opengl
-ninja
+  --enable-opengl \
+  --disable-werror \
+  --disable-docs \
+  --audio-drv-list=sdl
+ninja qemu-system-i386.dll
+strip --strip-unneeded qemu-system-i386.dll
 ```
 
 The result required by the host is `build-uwp-embed/qemu-system-i386.dll`.
@@ -132,6 +139,8 @@ UWP-Port/AppPackages/UWP-Port/<package-version>_x64_Test/
 Increment the four-part `Identity Version` in `Package.appxmanifest` before
 creating an update for an already installed PC or Xbox package.
 
+The current source manifest version is `1.0.0.100`.
+
 ## GitHub Actions
 
 The `Build UWP-Port` workflow performs the complete x64 Release build on a
@@ -168,6 +177,30 @@ committed with the Save settings button on the Network page.
 At first launch, UWP-Port creates `LocalState/games` and uses it as the default
 Games folder. Selecting another Games folder stores that brokered folder in the
 Windows Future Access List and overrides the LocalState default on later runs.
+
+## Performance and memory behavior
+
+OpenGL shader compilation and cache-file writes do not hold the renderer cache
+mutex. Mesa performs NIR-to-DXIL compilation and D3D12 pipeline creation on its
+compiler workers. Vulkan/DZN also persists its native pipeline cache in
+`LocalState`, reducing compilation work on later launches. Cache files may be
+removed to force a clean shader and pipeline rebuild when diagnosing renderer
+problems.
+
+The MCPX APU produces audio on its own thread. On UWP, PCI interrupt updates are
+forwarded to the QEMU main loop without blocking that real-time producer on the
+global QEMU lock. The audio stream uses bounded low and high watermarks so a
+long renderer frame does not cause either an underrun or a CPU-heavy catch-up
+burst.
+
+The small performance overlay displayed over the emulation surface reports:
+
+- **FPS**: completed video frames per second.
+- **MSPF**: average milliseconds spent per video frame.
+
+A temporary MSPF increase is expected while a new shader or pipeline is first
+compiled. Persistent increases should be investigated with `xemu.log`, a cold
+and warm cache comparison, and the same scene in both OpenGL and Vulkan/DZN.
 
 ## VLan/VPN rooms
 
@@ -208,6 +241,9 @@ The Logs page displays and refreshes the latest 256 KB of this file. On a PC,
 the file can also be retrieved from the installed package's `LocalState`
 directory. On Xbox, use Device Portal to access application files and download
 the log.
+
+Renderer shader and pipeline caches are also stored under `LocalState`; they do
+not require access to unrestricted desktop paths.
 
 ## UWP limitations
 

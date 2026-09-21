@@ -301,13 +301,15 @@ void nv2a_context_cleanup(void)
     }
 }
 
-static bool attempt_renderer_init(PGRAPHState *pg)
+static bool attempt_renderer_init(PGRAPHState *pg, bool report_error)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
 
     pg->renderer = renderers[g_config.display.renderer];
     if (!pg->renderer) {
-        xemu_queue_error_message("Configured renderer not available");
+        if (report_error) {
+            xemu_queue_error_message("Configured renderer not available");
+        }
         return false;
     }
 
@@ -317,7 +319,11 @@ static bool attempt_renderer_init(PGRAPHState *pg)
     }
     if (local_err) {
         const char *msg = error_get_pretty(local_err);
-        xemu_queue_error_message(msg);
+        if (report_error) {
+            xemu_queue_error_message(msg);
+        } else {
+            warn_report("%s", msg);
+        }
         error_free(local_err);
         local_err = NULL;
         return false;
@@ -328,14 +334,14 @@ static bool attempt_renderer_init(PGRAPHState *pg)
 
 static void init_renderer(PGRAPHState *pg)
 {
-    if (attempt_renderer_init(pg)) {
+    if (attempt_renderer_init(pg, false)) {
         return;  // Success
     }
 
     CONFIG_DISPLAY_RENDERER default_renderer = get_default_renderer();
     if (default_renderer != g_config.display.renderer) {
         g_config.display.renderer = default_renderer;
-        if (attempt_renderer_init(pg)) {
+        if (attempt_renderer_init(pg, true)) {
             g_autofree gchar *msg = g_strdup_printf(
                 "Switched to default renderer: %s", pg->renderer->name);
             xemu_queue_notification(msg);
