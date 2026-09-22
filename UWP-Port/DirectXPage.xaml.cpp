@@ -139,7 +139,12 @@ DirectXPage::DirectXPage():
 	m_systemPointerHidden(false),
 	m_logRefreshFrames(0),
 	m_lastFps(UINT32_MAX),
-	m_lastMspf(UINT32_MAX)
+	m_lastMspf(UINT32_MAX),
+	m_fileBrowserDialog(nullptr),
+	m_fileBrowserPath(nullptr),
+	m_fileBrowserItems(nullptr),
+	m_fileBrowserTag(nullptr),
+	m_fileBrowserUseSystemPicker(false)
 {
 	InitializeComponent();
 
