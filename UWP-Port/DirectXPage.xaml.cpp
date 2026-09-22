@@ -845,6 +845,9 @@ void DirectXPage::SelectFile_Click(Object^ sender, RoutedEventArgs^)
 {
 	auto button = safe_cast<Button^>(sender);
 	auto picker = ref new Windows::Storage::Pickers::FileOpenPicker();
+	picker->ViewMode = Windows::Storage::Pickers::PickerViewMode::List;
+	picker->SuggestedStartLocation =
+		Windows::Storage::Pickers::PickerLocationId::ComputerFolder;
 	picker->FileTypeFilter->Append("*");
 	create_task(picker->PickSingleFileAsync()).then([this, button](Windows::Storage::StorageFile^ file) {
 		if (!file) return;
@@ -857,6 +860,9 @@ void DirectXPage::SelectFolder_Click(Object^ sender, RoutedEventArgs^)
 {
 	auto button = safe_cast<Button^>(sender);
 	auto picker = ref new Windows::Storage::Pickers::FolderPicker();
+	picker->ViewMode = Windows::Storage::Pickers::PickerViewMode::List;
+	picker->SuggestedStartLocation =
+		Windows::Storage::Pickers::PickerLocationId::ComputerFolder;
 	picker->FileTypeFilter->Append("*");
 	create_task(picker->PickSingleFolderAsync()).then(
 		[this, button](StorageFolder^ folder) {
