@@ -1419,11 +1419,16 @@ int XemuHost::TruncateBrokeredFile(void*, int64_t handle, uint64_t size)
         if (base->kind == BrokeredHandle::Kind::NativeFile) {
             auto native = static_cast<NativeFileHandle*>(base);
             if (!native->writable) return -EROFS;
+            if (size > INT64_MAX) return -EINVAL;
             LARGE_INTEGER distance{};
+            LARGE_INTEGER zero{};
+            LARGE_INTEGER original{};
             distance.QuadPart = size;
             HANDLE file = native->file;
-            if (!SetFilePointerEx(file, distance, nullptr, FILE_BEGIN) ||
+            if (!SetFilePointerEx(file, zero, &original, FILE_CURRENT) ||
+                !SetFilePointerEx(file, distance, nullptr, FILE_BEGIN) ||
                 !SetEndOfFile(file)) return Win32ToErrno(GetLastError());
+            SetFilePointerEx(file, original, nullptr, FILE_BEGIN);
             return 0;
         }
         if (base->kind != BrokeredHandle::Kind::File) return -EISDIR;
