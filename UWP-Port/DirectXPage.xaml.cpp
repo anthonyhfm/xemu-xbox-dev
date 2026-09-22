@@ -856,6 +856,26 @@ void DirectXPage::SelectFile_Click(Object^ sender, RoutedEventArgs^)
 	});
 }
 
+void DirectXPage::ProbeDevelopmentFiles_Click(Object^, RoutedEventArgs^)
+{
+	developmentFilesStatus->Text = "Checking D:\\DevelopmentFiles...";
+	create_task(StorageFolder::GetFolderFromPathAsync("D:\\DevelopmentFiles"))
+		.then([](StorageFolder^ folder) {
+			return create_task(folder->GetItemsAsync());
+		})
+		.then([this](task<IVectorView<IStorageItem^>^> result) {
+			try {
+				auto items = result.get();
+				developmentFilesStatus->Text = "DevelopmentFiles readable: " +
+					ref new String(std::to_wstring(items->Size).c_str()) +
+					" items at root.";
+			} catch (Platform::Exception^ exception) {
+				developmentFilesStatus->Text =
+					"DevelopmentFiles unavailable to this app: " + exception->Message;
+			}
+		});
+}
+
 void DirectXPage::SelectFolder_Click(Object^ sender, RoutedEventArgs^)
 {
 	auto button = safe_cast<Button^>(sender);
