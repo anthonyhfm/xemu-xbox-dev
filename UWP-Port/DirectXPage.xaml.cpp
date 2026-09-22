@@ -6,8 +6,12 @@
 #include "pch.h"
 #include "DirectXPage.xaml.h"
 
+#include <fileapifromapp.h>
+#include <algorithm>
 #include <cmath>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 using namespace UWP_Port;
 
@@ -844,36 +848,122 @@ bool DirectXPage::SaveSettings(bool saveNetwork)
 void DirectXPage::SelectFile_Click(Object^ sender, RoutedEventArgs^)
 {
 	auto button = safe_cast<Button^>(sender);
+	ShowNativeFileBrowser(button->Tag->ToString());
+}
+
+void DirectXPage::OpenSystemFilePicker(String^ tagValue)
+{
 	auto picker = ref new Windows::Storage::Pickers::FileOpenPicker();
 	picker->ViewMode = Windows::Storage::Pickers::PickerViewMode::List;
 	picker->SuggestedStartLocation =
 		Windows::Storage::Pickers::PickerLocationId::ComputerFolder;
 	picker->FileTypeFilter->Append("*");
-	create_task(picker->PickSingleFileAsync()).then([this, button](Windows::Storage::StorageFile^ file) {
+	create_task(picker->PickSingleFileAsync()).then([this, tagValue](StorageFile^ file) {
 		if (!file) return;
-		auto tagValue = button->Tag->ToString();
-	MountXboxFile(file, tagValue, tagValue != "dvd");
+		MountXboxFile(file, tagValue, tagValue != "dvd");
 	});
 }
 
-void DirectXPage::ProbeDevelopmentFiles_Click(Object^, RoutedEventArgs^)
+void DirectXPage::ShowNativeFileBrowser(String^ tagValue)
 {
-	developmentFilesStatus->Text = "Checking D:\\DevelopmentFiles...";
-	create_task(StorageFolder::GetFolderFromPathAsync("D:\\DevelopmentFiles"))
-		.then([](StorageFolder^ folder) {
-			return create_task(folder->GetItemsAsync());
-		})
-		.then([this](task<IVectorView<IStorageItem^>^> result) {
-			try {
-				auto items = result.get();
-				developmentFilesStatus->Text = "DevelopmentFiles readable: " +
-					ref new String(std::to_wstring(items->Size).c_str()) +
-					" items at root.";
-			} catch (Platform::Exception^ exception) {
-				developmentFilesStatus->Text =
-					"DevelopmentFiles unavailable to this app: " + exception->Message;
-			}
+	if (m_fileBrowserDialog) return;
+	m_fileBrowserTag = tagValue;
+	m_fileBrowserUseSystemPicker = false;
+	m_fileBrowserDialog = ref new ContentDialog();
+	m_fileBrowserDialog->Title = "DevelopmentFiles";
+	m_fileBrowserDialog->CloseButtonText = "Cancel";
+	auto content = ref new StackPanel();
+	content->Spacing = 8;
+	m_fileBrowserPath = ref new TextBlock();
+	m_fileBrowserPath->TextWrapping = TextWrapping::Wrap;
+	content->Children->Append(m_fileBrowserPath);
+	auto scroll = ref new ScrollViewer();
+	scroll->Height = 400;
+	m_fileBrowserItems = ref new StackPanel();
+	scroll->Content = m_fileBrowserItems;
+	content->Children->Append(scroll);
+	auto fallback = ref new Button();
+	fallback->Content = "Use Xbox picker for USB files";
+	fallback->Click += ref new RoutedEventHandler([this](Object^, RoutedEventArgs^) {
+		m_fileBrowserUseSystemPicker = true;
+		m_fileBrowserDialog->Hide();
+	});
+	content->Children->Append(fallback);
+	m_fileBrowserDialog->Content = content;
+	m_fileBrowserDialog->Closed +=
+		ref new TypedEventHandler<ContentDialog^, ContentDialogClosedEventArgs^>(
+			[this](ContentDialog^, ContentDialogClosedEventArgs^) {
+				auto tag = m_fileBrowserTag;
+				bool useSystemPicker = m_fileBrowserUseSystemPicker;
+				m_fileBrowserDialog = nullptr;
+				m_fileBrowserPath = nullptr;
+				m_fileBrowserItems = nullptr;
+				m_fileBrowserTag = nullptr;
+				if (useSystemPicker) OpenSystemFilePicker(tag);
+			});
+	ShowNativeDirectory(L"D:\\DevelopmentFiles");
+	m_fileBrowserDialog->ShowAsync();
+}
+
+void DirectXPage::ShowNativeDirectory(const std::wstring& path)
+{
+	if (!m_fileBrowserItems) return;
+	m_fileBrowserItems->Children->Clear();
+	m_fileBrowserPath->Text = ref new String(path.c_str());
+	if (_wcsicmp(path.c_str(), L"D:\\DevelopmentFiles")) {
+		auto up = ref new Button();
+		up->Content = "[..] Up";
+		up->Click += ref new RoutedEventHandler([this, path](Object^, RoutedEventArgs^) {
+			ShowNativeDirectory(path.substr(0, path.find_last_of(L'\\')));
 		});
+		m_fileBrowserItems->Children->Append(up);
+	}
+	WIN32_FIND_DATAW data{};
+	std::wstring pattern = path + L"\\*";
+	HANDLE search = FindFirstFileExFromAppW(pattern.c_str(), FindExInfoBasic,
+		&data, FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+	if (search == INVALID_HANDLE_VALUE) {
+		DWORD error = GetLastError();
+		m_fileBrowserPath->Text = ref new String(path.c_str()) +
+			" - cannot browse (Win32 error " +
+			ref new String(std::to_wstring(error).c_str()) + ")";
+		return;
+	}
+	std::vector<std::pair<std::wstring, bool>> entries;
+	do {
+		if (!wcscmp(data.cFileName, L".") || !wcscmp(data.cFileName, L"..")) {
+			continue;
+		}
+		entries.emplace_back(data.cFileName,
+			(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0);
+	} while (FindNextFileW(search, &data));
+	FindClose(search);
+	std::sort(entries.begin(), entries.end(),
+		[](const std::pair<std::wstring, bool>& a,
+		   const std::pair<std::wstring, bool>& b) {
+			return a.second != b.second ? a.second > b.second :
+				_wcsicmp(a.first.c_str(), b.first.c_str()) < 0;
+		});
+	for (const auto& entry : entries) {
+		std::wstring fullPath = path + L"\\" + entry.first;
+		auto button = ref new Button();
+		button->Content = ref new String(
+			(std::wstring(entry.second ? L"[DIR] " : L"       ") +
+			 entry.first).c_str());
+		button->Click += ref new RoutedEventHandler(
+			[this, fullPath, isFolder = entry.second](Object^, RoutedEventArgs^) {
+				if (isFolder) {
+					ShowNativeDirectory(fullPath);
+				} else {
+					auto selected = ref new String(fullPath.c_str());
+					if (MountNativeXboxFile(selected, m_fileBrowserTag,
+					                        m_fileBrowserTag != "dvd")) {
+						m_fileBrowserDialog->Hide();
+					}
+				}
+			});
+		m_fileBrowserItems->Children->Append(button);
+	}
 }
 
 void DirectXPage::SelectFolder_Click(Object^ sender, RoutedEventArgs^)
@@ -936,6 +1026,9 @@ void DirectXPage::MountXboxFile(StorageFile^ file, String^ tagValue,
 	if (persist) {
 		StorageApplicationPermissions::FutureAccessList->AddOrReplace(
 			"xemu-" + tagValue, file);
+		if (SettingsValues()->HasKey("native." + tagValue)) {
+			SettingsValues()->Remove("native." + tagValue);
+		}
 	}
 
 	bool isXmu = tagValue->Length() >= 4 &&
@@ -990,8 +1083,72 @@ void DirectXPage::MountXboxFile(StorageFile^ file, String^ tagValue,
 		});
 }
 
+bool DirectXPage::MountNativeXboxFile(String^ path, String^ tagValue,
+	                                  bool persist)
+{
+	bool isXmu = tagValue->Length() >= 4 &&
+	             wcsncmp(tagValue->Data(), L"xmu-", 4) == 0;
+	bool writable = tagValue == "hdd" || tagValue == "eeprom" || isXmu;
+	if (!m_xemu->MountNativeFile("/broker/" + Utf8(tagValue), path, writable)) {
+		auto error = m_xemu->LastError();
+		errorText->Text = ref new String(
+			std::wstring(error.begin(), error.end()).c_str());
+		if (m_fileBrowserPath) m_fileBrowserPath->Text = errorText->Text;
+		else toolTabs->SelectedIndex = 6;
+		return false;
+	}
+	auto status = tagValue == "flash" ? flashFileStatus :
+	              tagValue == "bootrom" ? bootromFileStatus :
+	              tagValue == "hdd" ? hddFileStatus :
+	              tagValue == "eeprom" ? eepromFileStatus :
+	              tagValue == "xmu-p1a" ? xmuP1AStatus :
+	              tagValue == "xmu-p1b" ? xmuP1BStatus :
+	              tagValue == "xmu-p2a" ? xmuP2AStatus :
+	              tagValue == "xmu-p2b" ? xmuP2BStatus :
+	              tagValue == "xmu-p3a" ? xmuP3AStatus :
+	              tagValue == "xmu-p3b" ? xmuP3BStatus :
+	              tagValue == "xmu-p4a" ? xmuP4AStatus :
+	              tagValue == "xmu-p4b" ? xmuP4BStatus : dvdFileStatus;
+	std::wstring nativePath(path->Data());
+	size_t separator = nativePath.find_last_of(L'\\');
+	status->Text = ref new String(nativePath.substr(separator + 1).c_str()) +
+	               "  |  " + path;
+	if (tagValue == "flash") { m_flashReady = true; m_flashMountPending = false; }
+	else if (tagValue == "bootrom") { m_bootromReady = true; m_bootromMountPending = false; }
+	else if (tagValue == "hdd") { m_hddReady = true; m_hddMountPending = false; }
+	else if (tagValue == "dvd") m_dvdReady = true;
+	if (tagValue == "xmu-p1a") port1SlotA->SelectedIndex = 1;
+	else if (tagValue == "xmu-p1b") port1SlotB->SelectedIndex = 1;
+	else if (tagValue == "xmu-p2a") port2SlotA->SelectedIndex = 1;
+	else if (tagValue == "xmu-p2b") port2SlotB->SelectedIndex = 1;
+	else if (tagValue == "xmu-p3a") port3SlotA->SelectedIndex = 1;
+	else if (tagValue == "xmu-p3b") port3SlotB->SelectedIndex = 1;
+	else if (tagValue == "xmu-p4a") port4SlotA->SelectedIndex = 1;
+	else if (tagValue == "xmu-p4b") port4SlotB->SelectedIndex = 1;
+	if (persist) {
+		SettingsValues()->Insert("native." + tagValue,
+			PropertyValue::CreateString(path));
+		auto token = "xemu-" + tagValue;
+		if (StorageApplicationPermissions::FutureAccessList->ContainsItem(token)) {
+			StorageApplicationPermissions::FutureAccessList->Remove(token);
+		}
+		if (isXmu) SaveSettings(false);
+	}
+	UpdateStartButtonState();
+	return true;
+}
+
 void DirectXPage::RestorePersistedFiles()
 {
+	for (auto tag : { L"flash", L"bootrom", L"hdd", L"eeprom",
+	                  L"xmu-p1a", L"xmu-p1b", L"xmu-p2a", L"xmu-p2b",
+	                  L"xmu-p3a", L"xmu-p3b", L"xmu-p4a", L"xmu-p4b" }) {
+		auto tagValue = ref new String(tag);
+		auto path = ReadString("native." + tagValue, "");
+		if (!path->IsEmpty() && !MountNativeXboxFile(path, tagValue, false)) {
+			SettingsValues()->Remove("native." + tagValue);
+		}
+	}
 	PrepareLocalMachineFolder("BIOS", "flash");
 	PrepareLocalMachineFolder("MCPX", "bootrom");
 	PrepareLocalMachineFolder("hard_disk", "hdd");
@@ -1031,7 +1188,8 @@ void DirectXPage::PrepareLocalMachineFolder(String^ folderName,
 		folderName, CreationCollisionOption::OpenIfExists))
 		.then([this, folderName, tagValue](StorageFolder^ folder) {
 			auto token = "xemu-" + tagValue;
-			if (StorageApplicationPermissions::FutureAccessList->ContainsItem(token)) {
+			if (StorageApplicationPermissions::FutureAccessList->ContainsItem(token) ||
+			    SettingsValues()->HasKey("native." + tagValue)) {
 				return task_from_result();
 			}
 			auto status = tagValue == "flash" ? flashFileStatus :
@@ -1039,9 +1197,10 @@ void DirectXPage::PrepareLocalMachineFolder(String^ folderName,
 			status->Text = folder->Path + "  |  No file found";
 			return create_task(folder->GetFilesAsync()).then(
 				[this, tagValue](Windows::Foundation::Collections::IVectorView<StorageFile^>^ files) {
-					if (files->Size > 0 &&
-					    !StorageApplicationPermissions::FutureAccessList->ContainsItem(
-						    "xemu-" + tagValue)) {
+				if (files->Size > 0 &&
+				    !StorageApplicationPermissions::FutureAccessList->ContainsItem(
+					    "xemu-" + tagValue) &&
+				    !SettingsValues()->HasKey("native." + tagValue)) {
 						MountXboxFile(files->GetAt(0), tagValue, false);
 					}
 				});

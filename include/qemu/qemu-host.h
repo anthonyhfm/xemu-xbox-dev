@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define QEMU_HOST_API_VERSION_MAJOR 1U
-#define QEMU_HOST_API_VERSION_MINOR 5U
+#define QEMU_HOST_API_VERSION_MINOR 6U
 #define QEMU_HOST_API_VERSION \
     ((QEMU_HOST_API_VERSION_MAJOR << 16) | QEMU_HOST_API_VERSION_MINOR)
 
@@ -165,6 +165,10 @@ typedef int (*QemuHostBrokeredMkdirAtCallback)(
 typedef int (*QemuHostBrokeredRenameAtCallback)(
     void *opaque, void *storage_folder, const char *old_relative_path,
     const char *new_relative_path);
+typedef int (*QemuHostNativeOpenFileCallback)(
+    void *opaque, const char *native_path, int flags, int64_t *handle);
+typedef int (*QemuHostNativeStatFileCallback)(
+    void *opaque, const char *native_path, QemuHostStorageStat *stat);
 
 typedef struct QemuHostBrokeredStorageCallbacks {
     uint32_t size;
@@ -185,10 +189,12 @@ typedef struct QemuHostBrokeredStorageCallbacks {
     QemuHostStorageFlushCallback flush;
     QemuHostStorageReadDirCallback readdir;
     QemuHostStorageTruncateCallback truncate;
+    QemuHostNativeOpenFileCallback open_native_file;
+    QemuHostNativeStatFileCallback stat_native_file;
 } QemuHostBrokeredStorageCallbacks;
 
 #define QEMU_HOST_STORAGE_CALLBACKS_VERSION 1U
-#define QEMU_HOST_BROKERED_STORAGE_CALLBACKS_VERSION 1U
+#define QEMU_HOST_BROKERED_STORAGE_CALLBACKS_VERSION 2U
 #define QEMU_HOST_STORAGE_OPEN_DIRECTORY 0x40000000
 
 QEMU_HOST_EXPORT uint32_t qemu_host_get_api_version(void);
@@ -231,6 +237,8 @@ QEMU_HOST_EXPORT int qemu_host_mount_brokered_file(
     const char *virtual_path, void *storage_file, void *random_access_stream);
 QEMU_HOST_EXPORT int qemu_host_mount_brokered_folder(
     const char *virtual_path, void *storage_folder);
+QEMU_HOST_EXPORT int qemu_host_mount_native_file(
+    const char *virtual_path, const char *native_path);
 QEMU_HOST_EXPORT int qemu_host_unmount_brokered_storage(
     const char *virtual_path);
 

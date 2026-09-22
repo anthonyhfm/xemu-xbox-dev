@@ -65,7 +65,11 @@ namespace UWP_Port
 		void LoadSettings();
 		bool SaveSettings(bool saveNetwork);
 		void SelectFile_Click(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
-		void ProbeDevelopmentFiles_Click(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
+		void OpenSystemFilePicker(Platform::String^ tagValue);
+		void ShowNativeFileBrowser(Platform::String^ tagValue);
+		void ShowNativeDirectory(const std::wstring& path);
+		bool MountNativeXboxFile(Platform::String^ path,
+		                         Platform::String^ tagValue, bool persist);
 		void SelectFolder_Click(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ e);
 		void MountXboxFile(Windows::Storage::StorageFile^ file,
 		                   Platform::String^ tagValue, bool persist);
@@ -102,5 +106,10 @@ namespace UWP_Port
 		uint32_t m_lastFps;
 		uint32_t m_lastMspf;
 		std::string m_lastVlanStatus;
+		Windows::UI::Xaml::Controls::ContentDialog^ m_fileBrowserDialog;
+		Windows::UI::Xaml::Controls::TextBlock^ m_fileBrowserPath;
+		Windows::UI::Xaml::Controls::StackPanel^ m_fileBrowserItems;
+		Platform::String^ m_fileBrowserTag;
+		bool m_fileBrowserUseSystemPicker;
 	};
 }

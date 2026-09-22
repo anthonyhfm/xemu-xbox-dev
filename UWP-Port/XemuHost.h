@@ -46,6 +46,8 @@ namespace UWP_Port
                        Windows::Storage::Streams::IRandomAccessStream^ stream);
         bool MountFolder(const std::string& virtualPath,
                          Windows::Storage::StorageFolder^ folder);
+        bool MountNativeFile(const std::string& virtualPath,
+                             Platform::String^ path, bool writable);
 
     private:
         template<typename T> bool Resolve(T& target, const char* name);
@@ -70,6 +72,10 @@ namespace UWP_Port
         static int OpenBrokeredFile(void* opaque, void* storageFile,
                                     void* randomAccessStream, int flags,
                                     int64_t* handle);
+        static int OpenNativeFile(void* opaque, const char* path, int flags,
+                                  int64_t* handle);
+        static int StatNativeFile(void* opaque, const char* path,
+                                  QemuHostStorageStat* stat);
         static int OpenBrokeredPath(void* opaque, void* storageFolder,
                                     const char* relativePath, int flags,
                                     int mode, int64_t* handle);
@@ -163,5 +169,6 @@ namespace UWP_Port
         decltype(&qemu_host_register_brokered_storage_callbacks) m_registerBrokeredStorage;
         decltype(&qemu_host_mount_brokered_file) m_mountFile;
         decltype(&qemu_host_mount_brokered_folder) m_mountFolder;
+        decltype(&qemu_host_mount_native_file) m_mountNativeFile;
     };
 }

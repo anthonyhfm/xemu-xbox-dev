@@ -48,6 +48,7 @@ static void *host_brokered_opaque;
 typedef enum QemuHostBrokeredMountType {
     QEMU_HOST_BROKERED_FILE,
     QEMU_HOST_BROKERED_FOLDER,
+    QEMU_HOST_NATIVE_FILE,
 } QemuHostBrokeredMountType;
 
 typedef struct QemuHostBrokeredMount {
@@ -158,7 +159,9 @@ static bool host_brokered_path_valid(const char *path)
 
 static void host_brokered_mount_free(QemuHostBrokeredMount *mount)
 {
-    if (host_brokered_callbacks.release) {
+    if (mount->type == QEMU_HOST_NATIVE_FILE) {
+        g_free(mount->object);
+    } else if (host_brokered_callbacks.release) {
         if (mount->stream) {
             host_brokered_callbacks.release(host_brokered_opaque,
                                              mount->stream);
@@ -198,7 +201,7 @@ static QemuHostBrokeredMount *host_brokered_find_mount_locked(
 
         if (strncmp(path, mount->path, length) ||
             (path[length] && path[length] != '/') ||
-            (mount->type == QEMU_HOST_BROKERED_FILE && path[length])) {
+            (mount->type != QEMU_HOST_BROKERED_FOLDER && path[length])) {
             continue;
         }
         if (length > best_length) {
@@ -400,7 +403,8 @@ int qemu_host_register_brokered_storage_callbacks(
         callbacks->size < sizeof(*callbacks) || !callbacks->retain ||
         !callbacks->release || !callbacks->open_file || !callbacks->open_at ||
         !callbacks->read || !callbacks->seek || !callbacks->close ||
-        !callbacks->readdir) {
+        !callbacks->readdir || !callbacks->open_native_file ||
+        !callbacks->stat_native_file) {
         return -EINVAL;
     }
     g_mutex_lock(&host_state_lock);
@@ -486,6 +490,50 @@ int qemu_host_mount_brokered_folder(const char *virtual_path,
                                QEMU_HOST_BROKERED_FOLDER);
 }
 
+int qemu_host_mount_native_file(const char *virtual_path,
+                                const char *native_path)
+{
+    QemuHostBrokeredMount *mount;
+    guint i;
+
+    if (!host_brokered_path_valid(virtual_path) || !native_path ||
+        !native_path[0]) {
+        return -EINVAL;
+    }
+    g_mutex_lock(&host_state_lock);
+    if (host_initializing || host_initialized) {
+        g_mutex_unlock(&host_state_lock);
+        return -EBUSY;
+    }
+    g_mutex_lock(&host_storage_lock);
+    if (!host_brokered_callbacks.open_native_file) {
+        g_mutex_unlock(&host_storage_lock);
+        g_mutex_unlock(&host_state_lock);
+        return -ENOSYS;
+    }
+    host_brokered_ensure_tables();
+    mount = g_new0(QemuHostBrokeredMount, 1);
+    mount->path = g_strdup(virtual_path);
+    mount->type = QEMU_HOST_NATIVE_FILE;
+    mount->object = g_strdup(native_path);
+    for (i = 0; i < host_brokered_mounts->len; i++) {
+        QemuHostBrokeredMount *existing =
+            g_ptr_array_index(host_brokered_mounts, i);
+
+        if (!strcmp(existing->path, virtual_path)) {
+            g_ptr_array_index(host_brokered_mounts, i) = mount;
+            host_brokered_mount_free(existing);
+            g_mutex_unlock(&host_storage_lock);
+            g_mutex_unlock(&host_state_lock);
+            return 0;
+        }
+    }
+    g_ptr_array_add(host_brokered_mounts, mount);
+    g_mutex_unlock(&host_storage_lock);
+    g_mutex_unlock(&host_state_lock);
+    return 0;
+}
+
 int qemu_host_unmount_brokered_storage(const char *virtual_path)
 {
     guint i;
@@ -547,6 +595,9 @@ int qemu_host_storage_open(const char *path, int flags, int mode,
         ret = ret == QEMU_HOST_BROKERED_FILE ?
               brokered.open_file(opaque, object, stream, flags,
                                  &backend_handle) :
+              ret == QEMU_HOST_NATIVE_FILE ?
+              brokered.open_native_file(opaque, object, flags,
+                                        &backend_handle) :
               brokered.open_at(opaque, object, relative, flags, mode,
                                &backend_handle);
         if (ret < 0) {
@@ -674,7 +725,9 @@ int qemu_host_storage_stat(const char *path, QemuHostStorageStat *stat)
         brokered = host_brokered_callbacks;
         opaque = host_brokered_opaque;
         g_mutex_unlock(&host_storage_lock);
-        return type == QEMU_HOST_BROKERED_FILE ?
+        return type == QEMU_HOST_NATIVE_FILE ?
+               brokered.stat_native_file(opaque, object, stat) :
+               type == QEMU_HOST_BROKERED_FILE ?
                (brokered.stat_file ? brokered.stat_file(
                     opaque, object, stream, stat) : -ENOSYS) :
                (brokered.stat_at ? brokered.stat_at(

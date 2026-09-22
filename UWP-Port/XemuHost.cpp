@@ -3,6 +3,7 @@
 
 #include <robuffer.h>
 #include <roapi.h>
+#include <fileapifromapp.h>
 #include <windows.storage.h>
 #include <windows.ui.xaml.media.dxinterop.h>
 
@@ -22,7 +23,7 @@ using namespace concurrency;
 
 namespace {
 struct BrokeredHandle {
-    enum class Kind { File, Directory };
+    enum class Kind { File, Directory, NativeFile };
     explicit BrokeredHandle(Kind value) : kind(value) {}
     virtual ~BrokeredHandle() = default;
     Kind kind;
@@ -34,6 +35,15 @@ struct BrokeredFileStream : BrokeredHandle {
 
     BrokeredFileStream(IRandomAccessStream^ value, const std::string& fileName)
         : BrokeredHandle(Kind::File), stream(value), name(fileName) {}
+};
+
+struct NativeFileHandle : BrokeredHandle {
+    HANDLE file;
+    bool writable;
+
+    NativeFileHandle(HANDLE value, bool canWrite)
+        : BrokeredHandle(Kind::NativeFile), file(value), writable(canWrite) {}
+    ~NativeFileHandle() override { CloseHandle(file); }
 };
 
 struct BrokeredDirectoryEntry {
@@ -130,6 +140,17 @@ int ExceptionToErrno(Platform::Exception^ exception)
         hr == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND)) return -ENOENT;
     return -EIO;
 }
+
+int Win32ToErrno(DWORD error)
+{
+    if (error == ERROR_ACCESS_DENIED || error == ERROR_SHARING_VIOLATION) {
+        return -EACCES;
+    }
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+        return -ENOENT;
+    }
+    return -EIO;
+}
 }
 
 XemuHost::XemuHost()
@@ -155,7 +176,7 @@ XemuHost::XemuHost()
       m_registerLog(nullptr), m_setLogFile(nullptr),
       m_setPipelineCacheFile(nullptr),
       m_registerBrokeredStorage(nullptr), m_mountFile(nullptr),
-      m_mountFolder(nullptr)
+      m_mountFolder(nullptr), m_mountNativeFile(nullptr)
 {
     m_logPath = (ApplicationData::Current->LocalFolder->Path + L"\\xemu.log")->Data();
     CREATEFILE2_EXTENDED_PARAMETERS params{};
@@ -694,7 +715,8 @@ bool XemuHost::Load()
               Resolve(m_setGamepadState, "qemu_host_set_gamepad_state") &&
               Resolve(m_registerBrokeredStorage, "qemu_host_register_brokered_storage_callbacks") &&
               Resolve(m_mountFile, "qemu_host_mount_brokered_file") &&
-              Resolve(m_mountFolder, "qemu_host_mount_brokered_folder");
+              Resolve(m_mountFolder, "qemu_host_mount_brokered_folder") &&
+              Resolve(m_mountNativeFile, "qemu_host_mount_native_file");
     if (!ok || (m_getApiVersion() >> 16) != QEMU_HOST_API_VERSION_MAJOR) {
         SetError("Incompatible xemu embedding API version");
         return false;
@@ -713,12 +735,14 @@ bool XemuHost::Load()
     storage.retain = &XemuHost::RetainBrokeredObject;
     storage.release = &XemuHost::ReleaseBrokeredObject;
     storage.open_file = &XemuHost::OpenBrokeredFile;
+    storage.open_native_file = &XemuHost::OpenNativeFile;
     storage.open_at = &XemuHost::OpenBrokeredPath;
     storage.read = &XemuHost::ReadBrokeredFile;
     storage.write = &XemuHost::WriteBrokeredFile;
     storage.seek = &XemuHost::SeekBrokeredFile;
     storage.close = &XemuHost::CloseBrokeredFile;
     storage.stat_file = &XemuHost::StatBrokeredFile;
+    storage.stat_native_file = &XemuHost::StatNativeFile;
     storage.stat_at = &XemuHost::StatBrokeredPath;
     storage.flush = &XemuHost::FlushBrokeredFile;
     storage.readdir = &XemuHost::ReadBrokeredDirectory;
@@ -923,6 +947,32 @@ bool XemuHost::MountFolder(const std::string& virtualPath,
     return rc == 0;
 }
 
+bool XemuHost::MountNativeFile(const std::string& virtualPath,
+                               Platform::String^ path, bool writable)
+{
+    if (!path || !path->Length()) {
+        SetError("No native file path was selected");
+        return false;
+    }
+    HANDLE file = CreateFile2FromAppW(path->Data(),
+                                       writable ? GENERIC_READ | GENERIC_WRITE : GENERIC_READ,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                       OPEN_EXISTING, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        SetError("Cannot open " + ToUtf8(path) + " (Win32 error " +
+                 std::to_string(GetLastError()) + ")");
+        return false;
+    }
+    CloseHandle(file);
+    if (!Load()) return false;
+    int rc = m_mountNativeFile(virtualPath.c_str(), ToUtf8(path).c_str());
+    WriteDiagnostic("[storage] Mount native " + virtualPath + " returned " +
+                    std::to_string(rc));
+    if (rc) SetError("Failed to mount " + virtualPath + " (error " +
+                     std::to_string(rc) + ")");
+    return rc == 0;
+}
+
 void XemuHost::SetError(const std::string& error)
 {
     WriteDiagnostic("[error] " + error);
@@ -1037,6 +1087,44 @@ int XemuHost::OpenBrokeredFile(void* opaque, void* storageFile,
     }
 }
 
+int XemuHost::OpenNativeFile(void* opaque, const char* path, int flags,
+                             int64_t* handle)
+{
+    if (!path || !handle) return -EINVAL;
+    auto nativePath = ToPlatformString(path);
+    if (!nativePath) return -EINVAL;
+    bool writable = (flags & _O_RDWR) == _O_RDWR ||
+                    (flags & _O_WRONLY) == _O_WRONLY;
+    HANDLE file = CreateFile2FromAppW(nativePath->Data(),
+                                       writable ? GENERIC_READ | GENERIC_WRITE : GENERIC_READ,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                       OPEN_EXISTING, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return Win32ToErrno(GetLastError());
+    auto native = std::make_unique<NativeFileHandle>(file, writable);
+    static_cast<XemuHost*>(opaque)->TrackBrokeredHandle(native.get());
+    *handle = reinterpret_cast<int64_t>(native.release());
+    return 0;
+}
+
+int XemuHost::StatNativeFile(void*, const char* path,
+                             QemuHostStorageStat* stat)
+{
+    if (!path || !stat) return -EINVAL;
+    auto nativePath = ToPlatformString(path);
+    if (!nativePath) return -EINVAL;
+    HANDLE file = CreateFile2FromAppW(nativePath->Data(), GENERIC_READ,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                       OPEN_EXISTING, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return Win32ToErrno(GetLastError());
+    LARGE_INTEGER size{};
+    BOOL ok = GetFileSizeEx(file, &size);
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(file);
+    if (!ok) return Win32ToErrno(error);
+    FillFileStat(static_cast<uint64_t>(size.QuadPart), stat);
+    return 0;
+}
+
 int XemuHost::OpenBrokeredPath(void* opaque, void* storageFolder,
                                const char* relativePath, int flags, int,
                                int64_t* handle)
@@ -1107,6 +1195,14 @@ int64_t XemuHost::ReadBrokeredFile(void* opaque, int64_t handle, void* buffer,
         static std::atomic<uint32_t> readSequence{ 0 };
         uint32_t sequence = readSequence.fetch_add(1);
         auto base = reinterpret_cast<BrokeredHandle*>(handle);
+        if (base->kind == BrokeredHandle::Kind::NativeFile) {
+            DWORD count = static_cast<DWORD>((std::min)(size,
+                static_cast<size_t>((std::numeric_limits<DWORD>::max)())));
+            DWORD read = 0;
+            return ReadFile(static_cast<NativeFileHandle*>(base)->file,
+                            buffer, count, &read, nullptr) ? read :
+                   Win32ToErrno(GetLastError());
+        }
         if (base->kind != BrokeredHandle::Kind::File) return -EISDIR;
         auto brokered = static_cast<BrokeredFileStream*>(base);
         uint64_t position = brokered->stream->Position;
@@ -1150,6 +1246,14 @@ int64_t XemuHost::WriteBrokeredFile(void*, int64_t handle,
     }
     try {
         auto base = reinterpret_cast<BrokeredHandle*>(handle);
+        if (base->kind == BrokeredHandle::Kind::NativeFile) {
+            DWORD count = static_cast<DWORD>((std::min)(size,
+                static_cast<size_t>((std::numeric_limits<DWORD>::max)())));
+            DWORD written = 0;
+            return WriteFile(static_cast<NativeFileHandle*>(base)->file,
+                             buffer, count, &written, nullptr) ? written :
+                   Win32ToErrno(GetLastError());
+        }
         if (base->kind != BrokeredHandle::Kind::File) return -EISDIR;
         auto brokered = static_cast<BrokeredFileStream*>(base);
         if (!brokered->stream->CanWrite) {
@@ -1177,6 +1281,19 @@ int64_t XemuHost::SeekBrokeredFile(void*, int64_t handle, int64_t offset,
     }
     try {
         auto brokeredHandle = reinterpret_cast<BrokeredHandle*>(handle);
+        if (brokeredHandle->kind == BrokeredHandle::Kind::NativeFile) {
+            DWORD method = whence == SEEK_SET ? FILE_BEGIN :
+                           whence == SEEK_CUR ? FILE_CURRENT :
+                           whence == SEEK_END ? FILE_END : MAXDWORD;
+            if (method == MAXDWORD) return -EINVAL;
+            LARGE_INTEGER distance{};
+            LARGE_INTEGER position{};
+            distance.QuadPart = offset;
+            return SetFilePointerEx(
+                static_cast<NativeFileHandle*>(brokeredHandle)->file,
+                distance, &position, method) ? position.QuadPart :
+                Win32ToErrno(GetLastError());
+        }
         if (brokeredHandle->kind != BrokeredHandle::Kind::File) return -EISDIR;
         auto stream = static_cast<BrokeredFileStream*>(brokeredHandle)->stream;
         int64_t base = whence == SEEK_SET ? 0 :
@@ -1263,6 +1380,12 @@ int XemuHost::FlushBrokeredFile(void*, int64_t handle)
     }
     try {
         auto base = reinterpret_cast<BrokeredHandle*>(handle);
+        if (base->kind == BrokeredHandle::Kind::NativeFile) {
+            auto native = static_cast<NativeFileHandle*>(base);
+            if (!native->writable) return 0;
+            return FlushFileBuffers(native->file) ?
+                   0 : Win32ToErrno(GetLastError());
+        }
         if (base->kind != BrokeredHandle::Kind::File) return -EISDIR;
         auto stream = static_cast<BrokeredFileStream*>(base)->stream;
         return create_task(stream->FlushAsync()).get() ? 0 : -EIO;
@@ -1293,6 +1416,16 @@ int XemuHost::TruncateBrokeredFile(void*, int64_t handle, uint64_t size)
     }
     try {
         auto base = reinterpret_cast<BrokeredHandle*>(handle);
+        if (base->kind == BrokeredHandle::Kind::NativeFile) {
+            auto native = static_cast<NativeFileHandle*>(base);
+            if (!native->writable) return -EROFS;
+            LARGE_INTEGER distance{};
+            distance.QuadPart = size;
+            HANDLE file = native->file;
+            if (!SetFilePointerEx(file, distance, nullptr, FILE_BEGIN) ||
+                !SetEndOfFile(file)) return Win32ToErrno(GetLastError());
+            return 0;
+        }
         if (base->kind != BrokeredHandle::Kind::File) return -EISDIR;
         auto stream = static_cast<BrokeredFileStream*>(base)->stream;
         if (!stream->CanWrite) {

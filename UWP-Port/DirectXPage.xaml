@@ -36,9 +36,7 @@
           <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Padding="38" Spacing="10" MaxWidth="900" HorizontalAlignment="Left">
             <TextBlock Text="Xbox files" FontSize="30" FontWeight="SemiBold" Foreground="White"/>
-            <TextBlock Text="Files are opened through the Windows broker." Foreground="#FFC6D0DA"/>
-            <Button Content="Test DevelopmentFiles access" Click="ProbeDevelopmentFiles_Click"/>
-            <TextBlock x:Name="developmentFilesStatus" Text="Check whether this Xbox permits direct app access to D:\DevelopmentFiles." Foreground="#FFAAB8C5" TextWrapping="Wrap"/>
+            <TextBlock Text="Browse DevelopmentFiles in xemu. The Xbox system picker remains available for USB files." Foreground="#FFC6D0DA" TextWrapping="Wrap"/>
             <Grid ColumnSpacing="14"><Grid.ColumnDefinitions><ColumnDefinition Width="280"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><Button Content="Select flash ROM (BIOS)" Tag="flash" Click="SelectFile_Click"/><TextBlock x:Name="flashFileStatus" Grid.Column="1" Text="Not selected" Foreground="#FFAAB8C5" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/></Grid>
             <Grid ColumnSpacing="14"><Grid.ColumnDefinitions><ColumnDefinition Width="280"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><Button Content="Select MCPX boot ROM" Tag="bootrom" Click="SelectFile_Click"/><TextBlock x:Name="bootromFileStatus" Grid.Column="1" Text="Not selected" Foreground="#FFAAB8C5" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/></Grid>
             <Grid ColumnSpacing="14"><Grid.ColumnDefinitions><ColumnDefinition Width="280"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><Button Content="Select hard disk" Tag="hdd" Click="SelectFile_Click"/><TextBlock x:Name="hddFileStatus" Grid.Column="1" Text="Not selected" Foreground="#FFAAB8C5" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/></Grid>
